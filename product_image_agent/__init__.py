@@ -8,4 +8,4 @@ GITHUB_RELEASES_API = (
     "https://api.github.com/repos/zeeshanfarooq786/zef-snap/releases/latest"
 )
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"

@@ -149,7 +149,8 @@ def _theme(accent: str, near_black: str) -> dict[str, str]:
         "dark_panel_2": "#1B1F27",
         "light_bg": "#F6F4EF",
         "light_panel": "#FFFFFF",
-        "muted": "#9CA3AF",
-        "border": "#2B303B",
+        "light_panel_2": "#F1EEE7",
+        "light_muted": "#667085",
+        "light_border": "#DED8CC",
         "footer": "Zefsnap • Powered by Zef Technology",
     }

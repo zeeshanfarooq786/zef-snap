@@ -1,9 +1,32 @@
 from __future__ import annotations
 
+import base64
+import mimetypes
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
+
 from . import APP_DISPLAY_NAME, APP_FOOTER, APP_NAME, COMPANY_NAME, __version__
 from .downloader import discover_product_images, download_product_images, open_folder
+from .extractors import USER_AGENT
 from .self_updater import check_for_update, update_now
 from .theme import asset_path, file_to_data_uri, sample_logo_theme
+
+
+def _preview_data_uri(image_url: str, page_url: str) -> str:
+    parsed = urlparse(page_url)
+    referer = f"{parsed.scheme}://{parsed.netloc}/"
+    request = Request(
+        image_url,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Referer": referer,
+        },
+    )
+    with urlopen(request, timeout=30) as response:
+        data = response.read()
+    mime = mimetypes.guess_type(image_url)[0] or "image/jpeg"
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 
 class ZefsnapApi:
@@ -46,10 +69,20 @@ class ZefsnapApi:
     def fetch_images(self, url: str, high_res: bool = True) -> dict:
         try:
             result = discover_product_images(url, use_js=False, high_res=high_res)
+            image_urls = list(result.get("images") or [])
+            items: list[dict[str, str]] = []
+            for image_url in image_urls:
+                try:
+                    preview = _preview_data_uri(image_url, url)
+                except Exception:
+                    preview = image_url
+                items.append({"url": image_url, "preview": preview})
+            result["images"] = image_urls
+            result["items"] = items
             self.last_result = result
             return result
         except Exception as exc:
-            return {"error": str(exc), "images_found": 0, "images": []}
+            return {"error": str(exc), "images_found": 0, "images": [], "items": []}
 
     def choose_folder(self) -> str | None:
         if not self.window:
@@ -67,6 +100,7 @@ class ZefsnapApi:
         return None
 
     def download_selected(self, url: str, image_urls: list[str], output_dir: str | None = None) -> dict:
+        image_urls = [str(item) for item in (image_urls or []) if item]
         def progress(index: int, total: int, image_url: str, file_path: str, status: str) -> None:
             if self.window:
                 safe = {
@@ -116,15 +150,6 @@ def _html() -> str:
       --accent: #D89B2B;
       --accent-hover: #D89B2B;
       --near-black: #101216;
-      --bg: #0B0D10;
-      --panel: #14171D;
-      --panel-2: #1B1F27;
-      --text: #F8FAFC;
-      --muted: #9CA3AF;
-      --border: #2B303B;
-      --shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
-    }
-    [data-theme="light"] {
       --bg: #F6F4EF;
       --panel: #FFFFFF;
       --panel-2: #F1EEE7;
@@ -134,14 +159,22 @@ def _html() -> str:
       --shadow: 0 24px 70px rgba(16, 18, 22, 0.12);
     }
     * { box-sizing: border-box; }
-    body {
+    html, body {
       margin: 0;
-      min-height: 100vh;
+      height: 100%;
+      overflow: hidden;
       color: var(--text);
+      background: var(--bg);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    #scrollRoot {
+      height: 100vh;
+      overflow-y: auto;
+      overflow-x: hidden;
+      scroll-behavior: smooth;
       background:
         radial-gradient(circle at top left, color-mix(in srgb, var(--accent) 18%, transparent), transparent 32rem),
         linear-gradient(135deg, var(--bg), color-mix(in srgb, var(--bg) 88%, var(--near-black)));
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     button, input { font: inherit; }
     .app { width: min(1180px, calc(100vw - 48px)); margin: 0 auto; padding: 24px 0 36px; }
@@ -165,11 +198,6 @@ def _html() -> str:
     .version { color: var(--muted); font-size: 12px; margin-top: 3px; }
     .powered { color: var(--muted); font-size: 13px; }
     .header-actions { display: flex; align-items: center; gap: 14px; }
-    .theme-toggle {
-      border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
-      border-radius: 999px; padding: 9px 13px; cursor: pointer; transition: 180ms ease;
-    }
-    .theme-toggle:hover { border-color: var(--accent); transform: translateY(-1px); }
     .hero {
       margin-top: 28px; padding: 36px; border-radius: 32px; background: var(--panel);
       border: 1px solid var(--border); box-shadow: var(--shadow);
@@ -263,7 +291,7 @@ def _html() -> str:
       position: relative; overflow: hidden; border-radius: 22px; border: 1px solid var(--border);
       background: var(--panel); box-shadow: 0 12px 40px rgba(0,0,0,.16);
     }
-    .card img { width: 100%; aspect-ratio: 4/5; object-fit: cover; display: block; background: var(--panel-2); }
+    .card img { width: 100%; aspect-ratio: 4/5; object-fit: cover; display: block; background: var(--panel-2); cursor: zoom-in; }
     .card label {
       position: absolute; top: 10px; left: 10px; display: flex; align-items: center; gap: 7px;
       padding: 7px 10px; border-radius: 999px; background: rgba(0,0,0,.62); color: white; font-size: 12px;
@@ -289,7 +317,8 @@ def _html() -> str:
     }
   </style>
 </head>
-<body data-theme="dark">
+<body>
+  <div id="scrollRoot">
   <main class="app">
     <header>
       <div class="brand">
@@ -301,7 +330,6 @@ def _html() -> str:
       </div>
       <div class="header-actions">
         <div class="powered">Powered by Zef Technology</div>
-        <button class="theme-toggle" id="themeBtn">Dark</button>
       </div>
     </header>
 
@@ -332,6 +360,11 @@ def _html() -> str:
       </div>
     </section>
 
+    <section class="progress-box" id="progressBox">
+      <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="status" id="statusText">Waiting...</div>
+    </section>
+
     <section class="results" id="results">
       <div class="results-top">
         <span class="badge" id="countBadge">0 images found</span>
@@ -346,11 +379,6 @@ def _html() -> str:
       <div class="grid" id="grid"></div>
     </section>
 
-    <section class="progress-box" id="progressBox">
-      <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
-      <div class="status" id="statusText">Waiting...</div>
-    </section>
-
     <section class="complete" id="completeBox">
       <div><strong id="productName"></strong> saved to <span id="outputDir"></span></div>
       <button class="secondary" id="openFolderBtn" style="margin-top:12px">Open Folder</button>
@@ -358,21 +386,23 @@ def _html() -> str:
 
     <footer id="footer">Zefsnap • Powered by Zef Technology</footer>
   </main>
+  </div>
 
   <script>
-    const state = { images: [], url: "", folder: null, latestUpdate: null };
+    const state = { images: [], items: [], url: "", folder: null, latestUpdate: null };
     const $ = (id) => document.getElementById(id);
+    const scrollRoot = () => document.getElementById("scrollRoot");
 
     function setThemeVars(theme) {
       const root = document.documentElement.style;
       root.setProperty("--accent", theme.accent);
       root.setProperty("--accent-hover", theme.accent_hover);
       root.setProperty("--near-black", theme.near_black);
-      root.setProperty("--bg", theme.dark_bg);
-      root.setProperty("--panel", theme.dark_panel);
-      root.setProperty("--panel-2", theme.dark_panel_2);
-      root.setProperty("--muted", theme.muted);
-      root.setProperty("--border", theme.border);
+      root.setProperty("--bg", theme.light_bg);
+      root.setProperty("--panel", theme.light_panel);
+      root.setProperty("--panel-2", theme.light_panel_2);
+      root.setProperty("--muted", theme.light_muted);
+      root.setProperty("--border", theme.light_border);
     }
 
     async function boot() {
@@ -402,10 +432,33 @@ def _html() -> str:
       }
     }
 
+    function normalizeItems(result) {
+      if (Array.isArray(result.items) && result.items.length) {
+        return result.items.map((item) => ({
+          url: String(item.url || ""),
+          preview: String(item.preview || item.url || ""),
+        }));
+      }
+      const urls = Array.isArray(result.images) ? result.images : [];
+      return urls.map((url) => ({ url: String(url), preview: String(url) }));
+    }
+
+    function scrollToElement(element) {
+      if (!element) return;
+      const root = scrollRoot();
+      requestAnimationFrame(() => {
+        if (root) {
+          const top = element.getBoundingClientRect().top - root.getBoundingClientRect().top + root.scrollTop - 20;
+          root.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+        } else {
+          element.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      });
+    }
+
     function clearPreviousSession() {
       $("results").style.display = "none";
       $("completeBox").style.display = "none";
-      $("progressBox").style.display = "none";
       $("progressFill").style.width = "0%";
       $("grid").innerHTML = "";
       $("productName").textContent = "";
@@ -413,24 +466,41 @@ def _html() -> str:
       $("openFolderBtn").dataset.path = "";
       $("statusText").textContent = "";
       state.images = [];
-    }
-
-    function scrollToProgress() {
-      const progress = $("progressBox");
-      progress.style.display = "block";
-      progress.scrollIntoView({ behavior: "smooth", block: "start" });
+      state.items = [];
     }
 
     function renderResults(result) {
-      state.images = result.images || [];
-      $("results").style.display = state.images.length ? "block" : "none";
-      $("countBadge").textContent = `${state.images.length} images found`;
-      $("grid").innerHTML = state.images.map((url, index) => `
-        <article class="card">
-          <label><input type="checkbox" class="imageCheck" data-index="${index}" checked /> #${index + 1}</label>
-          <img src="${url}" alt="Product image ${index + 1}" loading="lazy" />
-        </article>
-      `).join("");
+      state.items = normalizeItems(result);
+      state.images = state.items.map((item) => item.url);
+      $("results").style.display = state.items.length ? "block" : "none";
+      $("countBadge").textContent = `${state.items.length} images found`;
+
+      const grid = $("grid");
+      grid.innerHTML = "";
+      state.items.forEach((item, index) => {
+        const card = document.createElement("article");
+        card.className = "card";
+        card.dataset.fullUrl = item.url;
+
+        const label = document.createElement("label");
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.className = "imageCheck";
+        checkbox.checked = true;
+        checkbox.dataset.index = String(index);
+        label.appendChild(checkbox);
+        label.appendChild(document.createTextNode(` #${index + 1}`));
+
+        const img = document.createElement("img");
+        img.alt = `Product image ${index + 1}`;
+        img.src = item.preview;
+        img.addEventListener("click", () => window.open(item.url, "_blank"));
+
+        card.appendChild(label);
+        card.appendChild(img);
+        grid.appendChild(card);
+      });
+
       $("statusText").textContent = result.error || "Images ready.";
       $("completeBox").style.display = "none";
     }
@@ -441,12 +511,6 @@ def _html() -> str:
       $("progressBox").style.display = "block";
       $("progressFill").style.width = `${percent}%`;
       $("statusText").textContent = `${data.status}: ${data.index}/${data.total} — ${data.file}`;
-    };
-
-    $("themeBtn").onclick = () => {
-      const next = document.body.dataset.theme === "dark" ? "light" : "dark";
-      document.body.dataset.theme = next;
-      $("themeBtn").textContent = next === "dark" ? "Dark" : "Light";
     };
 
     $("folderBtn").onclick = async () => {
@@ -479,13 +543,13 @@ def _html() -> str:
       $("statusText").textContent = "Fetching product page...";
       $("progressBox").style.display = "block";
       $("progressFill").style.width = "12%";
-      scrollToProgress();
+      scrollToElement($("progressBox"));
       const result = await window.pywebview.api.fetch_images(state.url, $("highRes").checked);
       renderResults(result);
       $("progressFill").style.width = result.images_found ? "100%" : "0%";
       $("fetchBtn").disabled = false;
-      if (result.images_found) {
-        $("results").scrollIntoView({ behavior: "smooth", block: "start" });
+      if (state.items.length) {
+        setTimeout(() => scrollToElement($("results")), 120);
       }
     };
 
@@ -500,7 +564,8 @@ def _html() -> str:
     $("downloadBtn").onclick = async () => {
       const selected = [...document.querySelectorAll(".imageCheck")]
         .filter((box) => box.checked)
-        .map((box) => state.images[Number(box.dataset.index)]);
+        .map((box) => box.closest(".card")?.dataset.fullUrl || state.items[Number(box.dataset.index)]?.url)
+        .filter(Boolean);
       if (!selected.length) {
         $("statusText").textContent = "Select at least one image to download.";
         return;
@@ -509,6 +574,7 @@ def _html() -> str:
       $("completeBox").style.display = "none";
       $("progressBox").style.display = "block";
       $("progressFill").style.width = "0%";
+      scrollToElement($("progressBox"));
       const result = await window.pywebview.api.download_selected(state.url, selected, state.folder);
       $("downloadBtn").disabled = false;
       if (!result.error) {
@@ -538,11 +604,26 @@ def _html() -> str:
 </html>"""
 
 
+def _quiet_pywebview_logs() -> None:
+    """Silence the noisy WinForms attribute-walk recursion errors on Windows.
+
+    Some pywebview + WebView2 combinations spam
+    'Error while processing window.native... maximum recursion depth exceeded'
+    to the pywebview logger. These are harmless but flood the console, so we
+    raise the logger threshold above ERROR.
+    """
+    import logging
+
+    logging.getLogger("pywebview").setLevel(logging.CRITICAL)
+
+
 def run() -> None:
     try:
         import webview
     except ImportError as exc:
         raise RuntimeError("Install PyWebView first: pip install pywebview") from exc
+
+    _quiet_pywebview_logs()
 
     api = ZefsnapApi()
     icon = asset_path("logo images", "icon.ico")
@@ -554,7 +635,7 @@ def run() -> None:
         "width": 1180,
         "height": 820,
         "min_size": (920, 680),
-        "background_color": "#0B0D10",
+        "background_color": "#F6F4EF",
     }
     if icon.exists():
         kwargs["icon"] = str(icon)
@@ -565,7 +646,11 @@ def run() -> None:
         kwargs.pop("icon", None)
         window = webview.create_window(**kwargs)
     api.window = window
-    webview.start(debug=False)
+
+    # http_server=True serves the UI over localhost instead of injecting raw
+    # HTML, which avoids the native-object serialization path that triggers the
+    # WinForms recursion spam on some Windows 10 WebView2 builds.
+    webview.start(debug=False, http_server=True)
 
 
 if __name__ == "__main__":
