@@ -1,43 +1,31 @@
 from __future__ import annotations
 
-import base64
 import json
-import mimetypes
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse
-from urllib.request import Request
 
 from . import APP_DISPLAY_NAME, APP_FOOTER, APP_NAME, COMPANY_NAME, __version__
 from .downloader import discover_product_images, download_product_images, open_folder
-from .extractors import USER_AGENT
-from .net import urlopen_safe
 from .self_updater import check_for_update, update_now
 from .theme import asset_path, file_to_data_uri, sample_logo_theme
 
 
-def _preview_data_uri(image_url: str, page_url: str, timeout: int = 12) -> str:
-    parsed = urlparse(page_url)
-    referer = f"{parsed.scheme}://{parsed.netloc}/"
-    request = Request(
-        image_url,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Referer": referer,
-        },
-    )
-    with urlopen_safe(request, timeout=timeout) as response:
-        data = response.read()
-    mime = mimetypes.guess_type(image_url)[0] or "image/jpeg"
-    encoded = base64.b64encode(data).decode("ascii")
-    return f"data:{mime};base64,{encoded}"
-
-
-def _preview_for_item(image_url: str, page_url: str) -> str:
-    try:
-        return _preview_data_uri(image_url, page_url)
-    except Exception:
-        return image_url
+def _sanitize_fetch_result(result: dict) -> dict:
+    """Keep bridge payloads small — never send base64 previews through pywebview."""
+    image_urls = [str(url) for url in (result.get("images") or []) if url]
+    items = [
+        {"url": url, "preview": url}
+        for url in image_urls
+    ]
+    return {
+        "url": result.get("url"),
+        "slug": result.get("slug"),
+        "product_name": result.get("product_name"),
+        "images_found": result.get("images_found", len(image_urls)),
+        "images": image_urls,
+        "items": items,
+        "used_js": bool(result.get("used_js")),
+        "error": result.get("error"),
+    }
 
 
 class ZefsnapApi:
@@ -45,6 +33,10 @@ class ZefsnapApi:
         self.window = None
         self.last_result: dict | None = None
         self.last_download: dict | None = None
+        self._fetch_status = "idle"
+        self._download_status = "idle"
+        self._update_status = "idle"
+        self._update_info: dict | None = None
         self._config = self._build_config()
 
     def _emit_js(self, callback: str, payload: dict) -> None:
@@ -80,15 +72,29 @@ class ZefsnapApi:
         return self._config
 
     def get_last_result(self) -> dict:
-        return self.last_result or {
+        if self.last_result:
+            return _sanitize_fetch_result(self.last_result)
+        return {
             "error": None,
             "images_found": 0,
             "images": [],
             "items": [],
         }
 
+    def get_fetch_status(self) -> str:
+        return self._fetch_status
+
     def get_last_download(self) -> dict:
         return self.last_download or {"error": "No download result.", "downloaded": []}
+
+    def get_download_status(self) -> str:
+        return self._download_status
+
+    def get_update_status(self) -> str:
+        return self._update_status
+
+    def get_update_info(self) -> dict:
+        return self._update_info or {"updateAvailable": False}
 
     def paste_clipboard(self) -> str:
         try:
@@ -104,38 +110,13 @@ class ZefsnapApi:
             return ""
 
     def fetch_images(self, url: str, high_res: bool = True) -> dict:
+        self._fetch_status = "running"
+
         def worker() -> None:
             try:
                 result = discover_product_images(url, use_js=False, high_res=high_res)
-                image_urls = list(result.get("images") or [])
-                items: list[dict[str, str]] = [
-                    {"url": image_url, "preview": image_url}
-                    for image_url in image_urls
-                ]
-
-                if image_urls:
-                    with ThreadPoolExecutor(max_workers=min(4, len(image_urls))) as pool:
-                        futures = {
-                            pool.submit(_preview_for_item, image_url, url): index
-                            for index, image_url in enumerate(image_urls)
-                        }
-                        for future in as_completed(futures):
-                            index = futures[future]
-                            try:
-                                items[index]["preview"] = future.result()
-                            except Exception:
-                                pass
-
-                result["images"] = image_urls
-                result["items"] = items
-                self.last_result = result
-                self._emit_js(
-                    "zefsnapFetchDone",
-                    {
-                        "images_found": result.get("images_found", 0),
-                        "error": result.get("error"),
-                    },
-                )
+                self.last_result = _sanitize_fetch_result(result)
+                self._fetch_status = "done"
             except Exception as exc:
                 self.last_result = {
                     "error": str(exc),
@@ -143,10 +124,7 @@ class ZefsnapApi:
                     "images": [],
                     "items": [],
                 }
-                self._emit_js(
-                    "zefsnapFetchDone",
-                    {"error": str(exc), "images_found": 0},
-                )
+                self._fetch_status = "error"
 
         return self._run_async(worker)
 
@@ -169,17 +147,19 @@ class ZefsnapApi:
         image_urls = [str(item) for item in (image_urls or []) if item]
 
         def progress(index: int, total: int, image_url: str, file_path: str, status: str) -> None:
-            if self.window:
-                safe = {
+            self._emit_js(
+                "zefsnapProgress",
+                {
                     "index": index,
                     "total": total,
                     "url": image_url,
                     "file": file_path,
                     "status": status,
-                }
-                self.window.evaluate_js(f"window.zefsnapProgress({safe!r})")
+                },
+            )
 
         def worker() -> None:
+            self._download_status = "running"
             try:
                 result = download_product_images(
                     url,
@@ -188,23 +168,14 @@ class ZefsnapApi:
                     progress_callback=progress,
                 )
                 self.last_download = result
-                self._emit_js(
-                    "zefsnapDownloadDone",
-                    {
-                        "error": result.get("error"),
-                        "downloaded_count": len(result.get("downloaded") or []),
-                    },
-                )
+                self._download_status = "done" if not result.get("error") else "error"
             except Exception as exc:
                 self.last_download = {
                     "error": str(exc),
                     "downloaded": [],
                     "output_dir": output_dir,
                 }
-                self._emit_js(
-                    "zefsnapDownloadDone",
-                    {"error": str(exc), "downloaded_count": 0},
-                )
+                self._download_status = "error"
 
         return self._run_async(worker)
 
@@ -219,11 +190,15 @@ class ZefsnapApi:
         return check_for_update()
 
     def check_update_async(self) -> dict:
+        self._update_status = "running"
+
         def worker() -> None:
             try:
-                self._emit_js("zefsnapUpdateChecked", check_for_update())
+                self._update_info = check_for_update()
             except Exception:
-                pass
+                self._update_info = {"updateAvailable": False}
+            finally:
+                self._update_status = "done"
 
         return self._run_async(worker)
 
@@ -480,6 +455,20 @@ def _html() -> str:
     const $ = (id) => document.getElementById(id);
     const scrollRoot = () => document.getElementById("scrollRoot");
 
+    async function waitForStatus(getter, doneValues, intervalMs = 250) {
+      return new Promise((resolve) => {
+        const tick = async () => {
+          const status = await getter();
+          if (doneValues.includes(status)) {
+            resolve(status);
+            return;
+          }
+          setTimeout(tick, intervalMs);
+        };
+        tick();
+      });
+    }
+
     async function boot() {
       const config = await window.pywebview.api.get_config();
       $("footer").textContent = config.footer;
@@ -499,41 +488,21 @@ def _html() -> str:
       }
 
       await window.pywebview.api.check_update_async();
-    }
-
-    window.zefsnapUpdateChecked = function(update) {
+      await waitForStatus(() => window.pywebview.api.get_update_status(), ["done"]);
+      const update = await window.pywebview.api.get_update_info();
       if (update.updateAvailable) {
         state.latestUpdate = update;
         $("updateText").textContent = `Update available — v${update.latest} (you're on v${update.current})`;
         $("updateBanner").style.display = "flex";
       }
-    };
+    }
 
-    window.zefsnapFetchDone = async function(meta) {
-      const result = await window.pywebview.api.get_last_result();
-      renderResults(result);
-      $("progressFill").style.width = result.images_found ? "100%" : "0%";
-      $("fetchBtn").disabled = false;
-      if (state.items.length) {
-        setTimeout(() => scrollToElement($("results")), 120);
-      }
-      if (meta?.error && !result.images_found) {
-        $("statusText").textContent = meta.error;
-      }
-    };
-
-    window.zefsnapDownloadDone = async function(meta) {
-      const result = await window.pywebview.api.get_last_download();
-      $("downloadBtn").disabled = false;
-      if (!result.error) {
-        $("completeBox").style.display = "block";
-        $("productName").textContent = result.product_name;
-        $("outputDir").textContent = result.output_dir;
-        $("openFolderBtn").dataset.path = result.output_dir;
-        $("statusText").textContent = "Download complete.";
-      } else {
-        $("statusText").textContent = result.error || meta?.error || "Download failed.";
-      }
+    window.zefsnapProgress = function(payload) {
+      const data = typeof payload === "string" ? JSON.parse(payload) : payload;
+      const percent = data.total ? Math.round((data.index / data.total) * 100) : 0;
+      $("progressBox").style.display = "block";
+      $("progressFill").style.width = `${percent}%`;
+      $("statusText").textContent = `${data.status}: ${data.index}/${data.total} — ${data.file}`;
     };
 
     function normalizeItems(result) {
@@ -617,14 +586,6 @@ def _html() -> str:
       $("completeBox").style.display = "none";
     }
 
-    window.zefsnapProgress = function(payload) {
-      const data = typeof payload === "string" ? JSON.parse(payload) : payload;
-      const percent = data.total ? Math.round((data.index / data.total) * 100) : 0;
-      $("progressBox").style.display = "block";
-      $("progressFill").style.width = `${percent}%`;
-      $("statusText").textContent = `${data.status}: ${data.index}/${data.total} — ${data.file}`;
-    };
-
     $("folderBtn").onclick = async () => {
       const folder = await window.pywebview.api.choose_folder();
       if (folder) {
@@ -657,6 +618,14 @@ def _html() -> str:
       $("progressFill").style.width = "12%";
       scrollToElement($("progressBox"));
       await window.pywebview.api.fetch_images(state.url, $("highRes").checked);
+      await waitForStatus(() => window.pywebview.api.get_fetch_status(), ["done", "error"]);
+      const result = await window.pywebview.api.get_last_result();
+      renderResults(result);
+      $("progressFill").style.width = result.images_found ? "100%" : "0%";
+      $("fetchBtn").disabled = false;
+      if (state.items.length) {
+        setTimeout(() => scrollToElement($("results")), 120);
+      }
     };
 
     function setAllSelected(selected) {
@@ -684,6 +653,18 @@ def _html() -> str:
       $("progressFill").style.width = "0%";
       scrollToElement($("progressBox"));
       await window.pywebview.api.download_selected(state.url, selected, state.folder);
+      await waitForStatus(() => window.pywebview.api.get_download_status(), ["done", "error"]);
+      const result = await window.pywebview.api.get_last_download();
+      $("downloadBtn").disabled = false;
+      if (!result.error) {
+        $("completeBox").style.display = "block";
+        $("productName").textContent = result.product_name;
+        $("outputDir").textContent = result.output_dir;
+        $("openFolderBtn").dataset.path = result.output_dir;
+        $("statusText").textContent = "Download complete.";
+      } else {
+        $("statusText").textContent = result.error;
+      }
     };
 
     $("openFolderBtn").onclick = async () => {
