@@ -1,0 +1,47 @@
+name: Build and Release Zefsnap
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Read version
+        id: version
+        shell: pwsh
+        run: |
+          $version = python -c "import product_image_agent as app; print(app.__version__)"
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build exe
+        run: pyinstaller build.spec
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Zefsnap v${{ steps.version.outputs.version }}
+          files: dist/Zefsnap.exe
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
