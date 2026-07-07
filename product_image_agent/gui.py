@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import threading
-from pathlib import Path
-
 from . import APP_DISPLAY_NAME, APP_FOOTER, APP_NAME, COMPANY_NAME, __version__
 from .downloader import discover_product_images, download_product_images, open_folder
 from .self_updater import check_for_update, update_now
-from .theme import asset_path, sample_logo_theme
+from .theme import asset_path, file_to_data_uri, sample_logo_theme
 
 
 class ZefsnapApi:
@@ -27,15 +24,28 @@ class ZefsnapApi:
             "version": __version__,
             "theme": theme,
             "assets": {
-                "icon": icon_png.as_uri() if icon_png.exists() else "",
-                "wordmark": wordmark.as_uri() if wordmark.exists() else "",
-                "smallWordmark": small_wordmark.as_uri() if small_wordmark.exists() else "",
+                "icon": file_to_data_uri(icon_png),
+                "wordmark": file_to_data_uri(wordmark),
+                "smallWordmark": file_to_data_uri(small_wordmark),
             },
         }
 
-    def fetch_images(self, url: str, use_js: bool = False, high_res: bool = True) -> dict:
+    def paste_clipboard(self) -> str:
         try:
-            result = discover_product_images(url, use_js=use_js, high_res=high_res)
+            import tkinter as tk
+
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                return str(root.clipboard_get()).strip()
+            finally:
+                root.destroy()
+        except Exception:
+            return ""
+
+    def fetch_images(self, url: str, high_res: bool = True) -> dict:
+        try:
+            result = discover_product_images(url, use_js=False, high_res=high_res)
             self.last_result = result
             return result
         except Exception as exc:
@@ -141,8 +151,16 @@ def _html() -> str:
       background: color-mix(in srgb, var(--panel) 88%, transparent);
       box-shadow: var(--shadow); backdrop-filter: blur(18px);
     }
-    .brand { display: flex; align-items: center; gap: 14px; }
-    .brand img { max-height: 38px; max-width: 190px; object-fit: contain; }
+    .brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
+    .brand img {
+      display: block;
+      height: 34px;
+      width: auto;
+      max-width: min(220px, 42vw);
+      object-fit: contain;
+      object-position: left center;
+    }
+    .brand-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
     .brand-fallback { font-size: 24px; font-weight: 850; letter-spacing: -0.05em; }
     .version { color: var(--muted); font-size: 12px; margin-top: 3px; }
     .powered { color: var(--muted); font-size: 13px; }
@@ -158,11 +176,39 @@ def _html() -> str:
     }
     h1 { margin: 0 0 10px; font-size: clamp(34px, 5vw, 60px); letter-spacing: -0.07em; line-height: 0.95; }
     .subtitle { margin: 0 0 28px; color: var(--muted); font-size: 16px; max-width: 680px; }
-    .input-row { display: grid; grid-template-columns: 1fr auto; gap: 14px; }
+    .input-row { display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: stretch; }
+    .url-field {
+      position: relative;
+      display: flex;
+      align-items: center;
+      min-width: 0;
+    }
     .url-input {
       width: 100%; border: 1px solid var(--border); border-radius: 20px; background: var(--panel-2);
-      color: var(--text); padding: 18px 20px; outline: none; transition: 180ms ease;
+      color: var(--text); padding: 18px 56px 18px 20px; outline: none; transition: 180ms ease;
     }
+    .paste-btn {
+      position: absolute;
+      right: 8px;
+      width: 40px;
+      height: 40px;
+      border: 1px solid transparent;
+      border-radius: 14px;
+      background: color-mix(in srgb, var(--panel) 70%, transparent);
+      color: var(--muted);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: 180ms ease;
+    }
+    .paste-btn:hover {
+      color: var(--text);
+      border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+      background: color-mix(in srgb, var(--accent) 14%, var(--panel-2));
+      transform: translateY(-1px);
+    }
+    .paste-btn svg { width: 18px; height: 18px; }
     .url-input:focus { border-color: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent); }
     .primary, .secondary {
       border: 0; border-radius: 18px; padding: 16px 22px; cursor: pointer;
@@ -178,7 +224,7 @@ def _html() -> str:
     }
     .option {
       display: flex; align-items: center; gap: 9px; border: 1px solid var(--border);
-      background: color-mix(in srgb, var(--panel-2) 85%, transparent); padding: 10px 12px; border-radius: 999px;
+      background: color-mix(in srgb, var(--panel-2) 85%, transparent); padding: 10px 14px; border-radius: 999px;
     }
     .option input { accent-color: var(--accent); }
     .folder-path { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -188,7 +234,29 @@ def _html() -> str:
       background: color-mix(in srgb, var(--accent) 12%, var(--panel)); padding: 13px 16px; border-radius: 18px;
     }
     .results { display: none; margin-top: 24px; }
-    .results-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+    .results-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+    .results-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .btn-group {
+      display: inline-flex;
+      align-items: stretch;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+      background: var(--panel-2);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
+    }
+    .btn-group .group-btn {
+      border: 0;
+      border-right: 1px solid var(--border);
+      border-radius: 0;
+      padding: 12px 16px;
+      min-width: 108px;
+    }
+    .btn-group .group-btn:last-child { border-right: 0; }
+    .btn-group .group-btn.active {
+      background: color-mix(in srgb, var(--accent) 16%, var(--panel-2));
+      color: var(--text);
+    }
     .badge { background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; padding: 9px 13px; color: var(--muted); }
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; }
     .card {
@@ -226,8 +294,10 @@ def _html() -> str:
     <header>
       <div class="brand">
         <img id="wordmark" alt="Zefsnap" />
-        <div id="brandFallback" class="brand-fallback">Zefsnap</div>
-        <div class="version" id="version"></div>
+        <div class="brand-meta">
+          <div id="brandFallback" class="brand-fallback">Zefsnap</div>
+          <div class="version" id="version"></div>
+        </div>
       </div>
       <div class="header-actions">
         <div class="powered">Powered by Zef Technology</div>
@@ -239,14 +309,21 @@ def _html() -> str:
       <h1>Download product galleries in seconds.</h1>
       <p class="subtitle">Paste a product page URL. Zefsnap finds high-resolution images, lets you review them, and saves the selected set locally.</p>
       <div class="input-row">
-        <input class="url-input" id="url" placeholder="https://example.com/products/product-name" />
+        <div class="url-field">
+          <input class="url-input" id="url" placeholder="Paste product page URL here" />
+          <button class="paste-btn" id="pasteBtn" type="button" title="Paste from clipboard" aria-label="Paste from clipboard">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="8" y="2" width="12" height="16" rx="2"></rect>
+              <path d="M4 6a2 2 0 0 1 2-2h1"></path>
+              <path d="M4 10v10a2 2 0 0 0 2 2h10"></path>
+            </svg>
+          </button>
+        </div>
         <button class="primary" id="fetchBtn">Fetch Images</button>
       </div>
       <div class="options">
-        <label class="option"><input type="checkbox" id="dryRun" /> Dry-run preview</label>
-        <label class="option"><input type="checkbox" id="useJs" /> Use JS fallback</label>
         <label class="option"><input type="checkbox" id="highRes" checked /> High-res mode</label>
-        <button class="secondary" id="folderBtn">Choose Folder</button>
+        <button class="secondary" id="folderBtn" type="button">Choose Folder</button>
         <span class="folder-path" id="folderPath">Default: downloads/product-name</span>
       </div>
       <div class="banner" id="updateBanner">
@@ -258,9 +335,12 @@ def _html() -> str:
     <section class="results" id="results">
       <div class="results-top">
         <span class="badge" id="countBadge">0 images found</span>
-        <div>
-          <button class="secondary" id="selectAllBtn">Select All</button>
-          <button class="primary" id="downloadBtn">Download Selected</button>
+        <div class="results-actions">
+          <div class="btn-group" role="group" aria-label="Selection controls">
+            <button class="secondary group-btn" id="selectAllBtn" type="button">Select All</button>
+            <button class="secondary group-btn" id="unselectAllBtn" type="button">Unselect All</button>
+          </div>
+          <button class="primary" id="downloadBtn" type="button">Download Selected</button>
         </div>
       </div>
       <div class="grid" id="grid"></div>
@@ -303,9 +383,15 @@ def _html() -> str:
       if (config.assets.icon) $("favicon").href = config.assets.icon;
       if (config.assets.wordmark) {
         $("wordmark").src = config.assets.wordmark;
+        $("wordmark").style.display = "block";
+        $("brandFallback").style.display = "none";
+      } else if (config.assets.smallWordmark) {
+        $("wordmark").src = config.assets.smallWordmark;
+        $("wordmark").style.display = "block";
         $("brandFallback").style.display = "none";
       } else {
         $("wordmark").style.display = "none";
+        $("brandFallback").style.display = "block";
       }
 
       const update = await window.pywebview.api.check_update();
@@ -314,6 +400,25 @@ def _html() -> str:
         $("updateText").textContent = `Update available — v${update.latest_version} (you're on v${update.current_version})`;
         $("updateBanner").style.display = "flex";
       }
+    }
+
+    function clearPreviousSession() {
+      $("results").style.display = "none";
+      $("completeBox").style.display = "none";
+      $("progressBox").style.display = "none";
+      $("progressFill").style.width = "0%";
+      $("grid").innerHTML = "";
+      $("productName").textContent = "";
+      $("outputDir").textContent = "";
+      $("openFolderBtn").dataset.path = "";
+      $("statusText").textContent = "";
+      state.images = [];
+    }
+
+    function scrollToProgress() {
+      const progress = $("progressBox");
+      progress.style.display = "block";
+      progress.scrollIntoView({ behavior: "smooth", block: "start" });
     }
 
     function renderResults(result) {
@@ -327,6 +432,7 @@ def _html() -> str:
         </article>
       `).join("");
       $("statusText").textContent = result.error || "Images ready.";
+      $("completeBox").style.display = "none";
     }
 
     window.zefsnapProgress = function(payload) {
@@ -351,29 +457,56 @@ def _html() -> str:
       }
     };
 
+    $("pasteBtn").onclick = async () => {
+      let text = "";
+      try {
+        text = await window.pywebview.api.paste_clipboard();
+      } catch (error) {
+        text = "";
+      }
+      if (text) {
+        $("url").value = text;
+        $("url").focus();
+        $("url").setSelectionRange(0, $("url").value.length);
+      }
+    };
+
     $("fetchBtn").onclick = async () => {
       state.url = $("url").value.trim();
       if (!state.url) return;
+      clearPreviousSession();
       $("fetchBtn").disabled = true;
       $("statusText").textContent = "Fetching product page...";
       $("progressBox").style.display = "block";
       $("progressFill").style.width = "12%";
-      const result = await window.pywebview.api.fetch_images(state.url, $("useJs").checked, $("highRes").checked);
+      scrollToProgress();
+      const result = await window.pywebview.api.fetch_images(state.url, $("highRes").checked);
       renderResults(result);
       $("progressFill").style.width = result.images_found ? "100%" : "0%";
       $("fetchBtn").disabled = false;
+      if (result.images_found) {
+        $("results").scrollIntoView({ behavior: "smooth", block: "start" });
+      }
     };
 
     $("selectAllBtn").onclick = () => {
       document.querySelectorAll(".imageCheck").forEach((box) => box.checked = true);
     };
 
+    $("unselectAllBtn").onclick = () => {
+      document.querySelectorAll(".imageCheck").forEach((box) => box.checked = false);
+    };
+
     $("downloadBtn").onclick = async () => {
       const selected = [...document.querySelectorAll(".imageCheck")]
         .filter((box) => box.checked)
         .map((box) => state.images[Number(box.dataset.index)]);
-      if (!selected.length || $("dryRun").checked) return;
+      if (!selected.length) {
+        $("statusText").textContent = "Select at least one image to download.";
+        return;
+      }
       $("downloadBtn").disabled = true;
+      $("completeBox").style.display = "none";
       $("progressBox").style.display = "block";
       $("progressFill").style.width = "0%";
       const result = await window.pywebview.api.download_selected(state.url, selected, state.folder);
@@ -383,6 +516,7 @@ def _html() -> str:
         $("productName").textContent = result.product_name;
         $("outputDir").textContent = result.output_dir;
         $("openFolderBtn").dataset.path = result.output_dir;
+        $("statusText").textContent = "Download complete.";
       } else {
         $("statusText").textContent = result.error;
       }

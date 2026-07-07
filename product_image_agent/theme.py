@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import mimetypes
 import struct
 import zlib
 from pathlib import Path
@@ -14,6 +16,14 @@ def project_root() -> Path:
 
 def asset_path(*parts: str) -> Path:
     return project_root().joinpath(*parts)
+
+
+def file_to_data_uri(path: Path) -> str:
+    if not path.exists():
+        return ""
+    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 
 def _read_png_pixels(path: Path) -> list[tuple[int, int, int, int]]:

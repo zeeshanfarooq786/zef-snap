@@ -401,31 +401,61 @@ class QuinceExtractor(BaseExtractor):
         return raw_url
 
 
+RELATED_PRODUCT_MARKERS = (
+    "you may also like",
+    "related products",
+    "customers also viewed",
+    "similar products",
+    "recently viewed",
+    "recommended for you",
+)
+
+
+def _main_product_html(html: str) -> str:
+    lower = html.lower()
+    end = len(html)
+    for marker in RELATED_PRODUCT_MARKERS:
+        idx = lower.find(marker)
+        if idx > 0:
+            end = min(end, idx)
+
+    start = lower.find("productview")
+    if start == -1:
+        start = lower.find("magiczoom")
+    if start == -1:
+        start = 0
+    return html[start:end]
+
+
 class BigCommerceExtractor(BaseExtractor):
     """Fjackets, Angel Jackets, and similar BigCommerce + MagicZoom stores."""
 
     domains = ("fjackets.com", "angeljackets.com")
 
     def extract(self, html: str, page_url: str, *, high_res: bool = True) -> list[str]:
-        start = html.find("MagicZoom")
-        if start == -1:
-            return self._from_json_ld(html, page_url, high_res=high_res)
+        gallery_html = _main_product_html(html)
+        urls: list[str] = []
 
-        chunk = html[start : start + 30000]
-        zoom_urls = re.findall(
+        for pattern in [
+            r'data-image=["\']([^"\']+product_images[^"\']+)["\']',
+            r'data-zoom-image=["\']([^"\']+product_images[^"\']+)["\']',
+            r'href=["\']([^"\']+product_images/[^"\']+_zoom\.(?:webp|jpg|jpeg|png))["\']',
             r'https?://[^"\']+product_images/[^"\']+_zoom\.(?:webp|jpg|jpeg|png)',
-            chunk,
-            flags=re.I,
-        )
-        if zoom_urls:
-            return self._finish(zoom_urls, page_url, high_res=high_res)
-
-        std_urls = re.findall(
             r'https?://[^"\']+product_images/[^"\']+_std\.(?:webp|jpg|jpeg|png)',
-            chunk,
-            flags=re.I,
-        )
-        return self._finish(std_urls, page_url, high_res=high_res)
+        ]:
+            for match in re.findall(pattern, gallery_html, flags=re.I):
+                value = match if isinstance(match, str) else match
+                if "%%" in value or image_is_noise(value):
+                    continue
+                urls.append(value)
+
+        if urls:
+            zoom_urls = [u for u in urls if "_zoom." in u.lower()]
+            if zoom_urls:
+                urls = zoom_urls
+            return self._finish(urls, page_url, high_res=high_res)
+
+        return self._from_json_ld(html, page_url, high_res=high_res)
 
     def _from_json_ld(self, html: str, page_url: str, *, high_res: bool) -> list[str]:
         return self._finish(find_json_ld_images(html, page_url), page_url, high_res=high_res)
