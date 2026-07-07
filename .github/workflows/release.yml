@@ -45,6 +45,22 @@ jobs:
           $version = "${{ steps.version.outputs.version }}"
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=$version installer.iss
 
+      - name: Verify frozen assets
+        shell: pwsh
+        run: |
+          $verifyFile = Join-Path $env:TEMP "zefsnap_assets_verify.txt"
+          if (Test-Path $verifyFile) { Remove-Item $verifyFile -Force }
+          $process = Start-Process -FilePath "dist\Zefsnap\Zefsnap.exe" -ArgumentList "--verify-assets" -PassThru -WindowStyle Hidden
+          if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            throw "Frozen asset verification timed out."
+          }
+          if (-not (Test-Path $verifyFile)) { throw "Frozen asset verification file was not created." }
+          $output = Get-Content $verifyFile -Raw | ConvertFrom-Json
+          if (-not $output.icon_exists) { throw "Frozen build is missing icon.ico: $($output.icon_path)" }
+          if ($output.wordmark_uri_len -lt 100) { throw "Frozen build wordmark data URI is empty." }
+          Write-Host $output
+
       - name: Verify frozen SSL
         shell: pwsh
         run: |

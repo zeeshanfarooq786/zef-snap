@@ -4,6 +4,7 @@
 import os
 import sys
 import tempfile
+import json
 from pathlib import Path
 
 
@@ -37,6 +38,22 @@ def main() -> None:
             raise
         finally:
             os._exit(0)
+
+    if "--verify-assets" in sys.argv:
+        from product_image_agent.theme import asset_path, bundled_root, file_to_data_uri
+
+        verify_file = Path(tempfile.gettempdir()) / "zefsnap_assets_verify.txt"
+        icon = asset_path("logo images", "icon.ico")
+        wordmark = asset_path("logo images", "wordmark-small.png")
+        payload = {
+            "bundled_root": str(bundled_root()),
+            "icon_path": str(icon),
+            "icon_exists": icon.exists(),
+            "wordmark_exists": wordmark.exists(),
+            "wordmark_uri_len": len(file_to_data_uri(wordmark)),
+        }
+        verify_file.write_text(json.dumps(payload), encoding="utf-8")
+        os._exit(0)
 
     from product_image_agent.gui import run
 

@@ -44,6 +44,7 @@ class ZefsnapApi:
     def __init__(self) -> None:
         self.window = None
         self.last_result: dict | None = None
+        self.last_download: dict | None = None
         self._config = self._build_config()
 
     def _emit_js(self, callback: str, payload: dict) -> None:
@@ -77,6 +78,17 @@ class ZefsnapApi:
 
     def get_config(self) -> dict:
         return self._config
+
+    def get_last_result(self) -> dict:
+        return self.last_result or {
+            "error": None,
+            "images_found": 0,
+            "images": [],
+            "items": [],
+        }
+
+    def get_last_download(self) -> dict:
+        return self.last_download or {"error": "No download result.", "downloaded": []}
 
     def paste_clipboard(self) -> str:
         try:
@@ -117,11 +129,23 @@ class ZefsnapApi:
                 result["images"] = image_urls
                 result["items"] = items
                 self.last_result = result
-                self._emit_js("zefsnapFetchDone", result)
-            except Exception as exc:
                 self._emit_js(
                     "zefsnapFetchDone",
-                    {"error": str(exc), "images_found": 0, "images": [], "items": []},
+                    {
+                        "images_found": result.get("images_found", 0),
+                        "error": result.get("error"),
+                    },
+                )
+            except Exception as exc:
+                self.last_result = {
+                    "error": str(exc),
+                    "images_found": 0,
+                    "images": [],
+                    "items": [],
+                }
+                self._emit_js(
+                    "zefsnapFetchDone",
+                    {"error": str(exc), "images_found": 0},
                 )
 
         return self._run_async(worker)
@@ -163,11 +187,23 @@ class ZefsnapApi:
                     selected_urls=image_urls,
                     progress_callback=progress,
                 )
-                self._emit_js("zefsnapDownloadDone", result)
-            except Exception as exc:
+                self.last_download = result
                 self._emit_js(
                     "zefsnapDownloadDone",
-                    {"error": str(exc), "downloaded": [], "output_dir": output_dir},
+                    {
+                        "error": result.get("error"),
+                        "downloaded_count": len(result.get("downloaded") or []),
+                    },
+                )
+            except Exception as exc:
+                self.last_download = {
+                    "error": str(exc),
+                    "downloaded": [],
+                    "output_dir": output_dir,
+                }
+                self._emit_js(
+                    "zefsnapDownloadDone",
+                    {"error": str(exc), "downloaded_count": 0},
                 )
 
         return self._run_async(worker)
@@ -473,16 +509,21 @@ def _html() -> str:
       }
     };
 
-    window.zefsnapFetchDone = function(result) {
+    window.zefsnapFetchDone = async function(meta) {
+      const result = await window.pywebview.api.get_last_result();
       renderResults(result);
       $("progressFill").style.width = result.images_found ? "100%" : "0%";
       $("fetchBtn").disabled = false;
       if (state.items.length) {
         setTimeout(() => scrollToElement($("results")), 120);
       }
+      if (meta?.error && !result.images_found) {
+        $("statusText").textContent = meta.error;
+      }
     };
 
-    window.zefsnapDownloadDone = function(result) {
+    window.zefsnapDownloadDone = async function(meta) {
+      const result = await window.pywebview.api.get_last_download();
       $("downloadBtn").disabled = false;
       if (!result.error) {
         $("completeBox").style.display = "block";
@@ -491,7 +532,7 @@ def _html() -> str:
         $("openFolderBtn").dataset.path = result.output_dir;
         $("statusText").textContent = "Download complete.";
       } else {
-        $("statusText").textContent = result.error;
+        $("statusText").textContent = result.error || meta?.error || "Download failed.";
       }
     };
 

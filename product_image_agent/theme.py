@@ -11,25 +11,22 @@ from pathlib import Path
 _DATA_URI_CACHE: dict[str, str] = {}
 
 
-def project_root() -> Path:
+def bundled_root() -> Path:
     if getattr(sys, "frozen", False):
         exe_dir = Path(sys.executable).parent
         internal = exe_dir / "_internal"
-        if internal.is_dir():
-            return exe_dir
-        return exe_dir
+        return internal if internal.is_dir() else exe_dir
+    return Path(__file__).resolve().parents[1]
+
+
+def project_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
     return Path(__file__).resolve().parents[1]
 
 
 def asset_path(*parts: str) -> Path:
-    root = project_root()
-    if getattr(sys, "frozen", False):
-        internal = root / "_internal"
-        candidates = [root.joinpath(*parts), internal.joinpath(*parts)]
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
-    return root.joinpath(*parts)
+    return bundled_root().joinpath(*parts)
 
 
 def _theme_cache_path() -> Path:
@@ -39,6 +36,8 @@ def _theme_cache_path() -> Path:
 
 
 def file_to_data_uri(path: Path) -> str:
+    if not path.exists():
+        return ""
     key = str(path.resolve())
     cached = _DATA_URI_CACHE.get(key)
     if cached is not None:
