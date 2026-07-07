@@ -1,12 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
+
+import certifi
 from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
 
 logo_dir = "logo images"
-datas = [("version.json", ".")]
+datas = [
+    ("version.json", "."),
+    (certifi.where(), "certifi"),
+]
 if os.path.isdir(logo_dir):
     datas.append((logo_dir, logo_dir))
 
@@ -18,7 +23,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=datas,
-    hiddenimports=collect_submodules("webview"),
+    hiddenimports=collect_submodules("webview") + ["certifi"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -33,17 +38,13 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="Zefsnap",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -51,4 +52,15 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=icon,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name="Zefsnap",
 )

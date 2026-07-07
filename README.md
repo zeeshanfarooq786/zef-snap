@@ -10,13 +10,13 @@
 
 ## What Zefsnap Includes
 
-- A modern **PyWebView desktop app** with a dark/light premium UI.
+- A modern **PyWebView desktop app** with a light premium UI.
 - A preserved **CLI** for scripting and fast terminal use.
 - Site-specific fast paths for **Quince**, **FJackets**, and **Angel Jackets**.
 - A stronger generic extractor for other product websites.
 - High-resolution URL upgrading for common CDN thumbnail patterns.
 - Optional Playwright rendering for JavaScript-heavy pages.
-- PyInstaller packaging as `Zefsnap.exe`.
+- PyInstaller packaging plus an Inno Setup Windows installer (`ZefsnapSetup.exe`).
 - GitHub Releases self-update support.
 
 ## Logo Assets
@@ -37,7 +37,8 @@ Zefsnap samples `logo images/icon.png` at runtime and derives the app theme from
 
 - Python 3.10+
 - `pywebview` for the desktop app
-- `pyinstaller` for building `Zefsnap.exe`
+- `pyinstaller` and `certifi` for building and HTTPS in the packaged app
+- Optional: Inno Setup 6 for building `ZefsnapSetup.exe` locally
 - Optional: `playwright` for JavaScript fallback extraction
 
 Install desktop/build dependencies:
@@ -64,12 +65,11 @@ python zefsnap.py
 The GUI includes:
 
 - Header with the Zefsnap wordmark and "Powered by Zef Technology"
-- URL input and **Fetch Images** button
-- Dry-run, folder picker, JavaScript fallback, and high-res toggles
+- URL input, paste button, and **Fetch Images** button
 - Responsive result grid with image checkboxes
 - Download progress bar and per-file status
 - Output confirmation with **Open Folder**
-- Dark/light theme toggle
+- GitHub Releases update banner when a newer installer is available
 
 ## CLI Usage
 
@@ -124,39 +124,52 @@ Zefsnap extracts product images in this order:
 
 The specialized Quince, FJackets, and Angel Jackets extractors still run first for speed and accuracy, but they also benefit from the shared high-resolution resolver.
 
-## Build Windows EXE
+## Install on Windows
 
-Build a single-file Windows executable:
+Download `ZefsnapSetup.exe` from the [latest GitHub Release](https://github.com/zeeshanfarooq786/zef-snap/releases/latest) and run it. The installer places Zefsnap in `%LOCALAPPDATA%\Zefsnap`, creates a Start Menu shortcut, and optionally a Desktop shortcut. No administrator rights are required.
+
+After installation, launch **Zefsnap** from the Start Menu.
+
+## Build Windows Installer
+
+Build the onedir app bundle:
 
 ```bash
+pip install -r requirements.txt
 pyinstaller build.spec
 ```
 
-or:
-
-```bash
-python build.py
-```
-
-The output is:
+The output folder is:
 
 ```text
-dist/Zefsnap.exe
+dist/Zefsnap/
 ```
 
-`logo images/icon.ico` is used as the executable icon when present, and `logo images/` is bundled as app data.
+Build the Windows installer with Inno Setup 6:
+
+```bash
+iscc /DAppVersion=1.0.4 installer.iss
+```
+
+The installer output is:
+
+```text
+dist/ZefsnapSetup.exe
+```
+
+`logo images/icon.ico` is used as the app icon when present, and `logo images/` is bundled as app data. The certifi CA bundle is also bundled so HTTPS works in the frozen app.
 
 ## Self-Updates
 
 Zefsnap checks GitHub Releases on startup through:
 
 ```text
-https://api.github.com/repos/<REPLACE-WITH-MY-GITHUB-USERNAME>/zefsnap/releases/latest
+https://api.github.com/repos/zeeshanfarooq786/zef-snap/releases/latest
 ```
 
-Before publishing, replace the placeholder in `product_image_agent/__init__.py` with your real GitHub username/repo path. When a newer release exists and includes `Zefsnap.exe`, the app shows an update banner and can download, replace, and relaunch itself using a temporary batch helper.
+When a newer release exists and includes `ZefsnapSetup.exe`, the app shows an update banner and can download and silently run the installer (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`).
 
-The workflow at `.github/workflows/release.yml` builds and publishes `dist/Zefsnap.exe` on every push to `main`.
+The workflow at `.github/workflows/release.yml` builds the onedir bundle, compiles `ZefsnapSetup.exe` with Inno Setup, and publishes it on every push to `main`.
 
 ## Python API
 

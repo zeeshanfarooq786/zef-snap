@@ -3,11 +3,12 @@ from __future__ import annotations
 import base64
 import mimetypes
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from . import APP_DISPLAY_NAME, APP_FOOTER, APP_NAME, COMPANY_NAME, __version__
 from .downloader import discover_product_images, download_product_images, open_folder
 from .extractors import USER_AGENT
+from .net import urlopen_safe
 from .self_updater import check_for_update, update_now
 from .theme import asset_path, file_to_data_uri, sample_logo_theme
 
@@ -22,7 +23,7 @@ def _preview_data_uri(image_url: str, page_url: str) -> str:
             "Referer": referer,
         },
     )
-    with urlopen(request, timeout=30) as response:
+    with urlopen_safe(request, timeout=30) as response:
         data = response.read()
     mime = mimetypes.guess_type(image_url)[0] or "image/jpeg"
     encoded = base64.b64encode(data).decode("ascii")
@@ -33,11 +34,12 @@ class ZefsnapApi:
     def __init__(self) -> None:
         self.window = None
         self.last_result: dict | None = None
+        self._config = self._build_config()
 
-    def get_config(self) -> dict:
+    def _build_config(self) -> dict:
         theme = sample_logo_theme()
         icon_png = asset_path("logo images", "icon.png")
-        wordmark = asset_path("logo images", "wordmark-full.png")
+        wordmark = asset_path("logo images", "wordmark-small.png")
         small_wordmark = asset_path("logo images", "wordmark-small.png")
         return {
             "appName": APP_NAME,
@@ -52,6 +54,9 @@ class ZefsnapApi:
                 "smallWordmark": file_to_data_uri(small_wordmark),
             },
         }
+
+    def get_config(self) -> dict:
+        return self._config
 
     def paste_clipboard(self) -> str:
         try:
@@ -147,16 +152,22 @@ def _html() -> str:
   <link id="favicon" rel="icon" href="" />
   <style>
     :root {
-      --accent: #D89B2B;
-      --accent-hover: #D89B2B;
-      --near-black: #101216;
-      --bg: #F6F4EF;
-      --panel: #FFFFFF;
-      --panel-2: #F1EEE7;
-      --text: #101216;
-      --muted: #667085;
-      --border: #DED8CC;
-      --shadow: 0 24px 70px rgba(16, 18, 22, 0.12);
+      --bg: #FBFBFD;
+      --surface: #FFFFFF;
+      --surface-sunken: #F3F3F5;
+      --border: #E4E4E8;
+      --text: #181818;
+      --text-muted: #6B6B70;
+      --accent: #EDA812;
+      --accent-hover: #D6960A;
+      --accent-tint: #FDF2DC;
+      --radius: 8px;
+      --hover-shadow: 0 1px 3px rgba(24, 24, 24, 0.06);
+      --sp-1: 8px;
+      --sp-2: 16px;
+      --sp-3: 24px;
+      --sp-4: 32px;
+      --sp-6: 48px;
     }
     * { box-sizing: border-box; }
     html, body {
@@ -165,155 +176,146 @@ def _html() -> str:
       overflow: hidden;
       color: var(--text);
       background: var(--bg);
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: -apple-system, "Segoe UI", "Inter", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
     }
     #scrollRoot {
       height: 100vh;
       overflow-y: auto;
       overflow-x: hidden;
       scroll-behavior: smooth;
-      background:
-        radial-gradient(circle at top left, color-mix(in srgb, var(--accent) 18%, transparent), transparent 32rem),
-        linear-gradient(135deg, var(--bg), color-mix(in srgb, var(--bg) 88%, var(--near-black)));
+      background: var(--bg);
     }
     button, input { font: inherit; }
-    .app { width: min(1180px, calc(100vw - 48px)); margin: 0 auto; padding: 24px 0 36px; }
+    .app { width: min(1080px, calc(100vw - 48px)); margin: 0 auto; padding: 0 0 var(--sp-6); }
+
+    /* Header */
     header {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 16px 20px; border: 1px solid var(--border); border-radius: 24px;
-      background: color-mix(in srgb, var(--panel) 88%, transparent);
-      box-shadow: var(--shadow); backdrop-filter: blur(18px);
+      display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2);
+      padding: var(--sp-2) 0; margin-bottom: var(--sp-6);
+      border-bottom: 1px solid var(--border);
     }
-    .brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
+    .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
     .brand img {
       display: block;
-      height: 34px;
+      height: 30px;
       width: auto;
-      max-width: min(220px, 42vw);
+      max-width: min(200px, 42vw);
       object-fit: contain;
       object-position: left center;
     }
-    .brand-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-    .brand-fallback { font-size: 24px; font-weight: 850; letter-spacing: -0.05em; }
-    .version { color: var(--muted); font-size: 12px; margin-top: 3px; }
-    .powered { color: var(--muted); font-size: 13px; }
-    .header-actions { display: flex; align-items: center; gap: 14px; }
-    .hero {
-      margin-top: 28px; padding: 36px; border-radius: 32px; background: var(--panel);
-      border: 1px solid var(--border); box-shadow: var(--shadow);
+    .brand-fallback { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+    .version {
+      font-size: 12px; font-weight: 500; letter-spacing: 0.02em; color: var(--text-muted);
+      background: var(--surface-sunken); padding: 4px 10px; border-radius: 999px;
     }
-    h1 { margin: 0 0 10px; font-size: clamp(34px, 5vw, 60px); letter-spacing: -0.07em; line-height: 0.95; }
-    .subtitle { margin: 0 0 28px; color: var(--muted); font-size: 16px; max-width: 680px; }
-    .input-row { display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: stretch; }
-    .url-field {
-      position: relative;
-      display: flex;
-      align-items: center;
-      min-width: 0;
+    .header-actions { display: flex; align-items: center; gap: 12px; }
+    .powered { color: var(--text-muted); font-size: 13px; font-weight: 500; letter-spacing: 0.02em; }
+
+    /* Hero */
+    .hero { margin-bottom: var(--sp-6); }
+    h1 {
+      margin: 0 0 12px; font-size: clamp(28px, 4vw, 36px); font-weight: 600;
+      letter-spacing: -0.01em; line-height: 1.15; color: var(--text);
     }
+    .subtitle { margin: 0 0 var(--sp-4); color: var(--text-muted); font-size: 15px; line-height: 1.5; max-width: 620px; }
+    .input-row { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: stretch; }
+    .url-field { position: relative; display: flex; align-items: center; min-width: 0; }
     .url-input {
-      width: 100%; border: 1px solid var(--border); border-radius: 20px; background: var(--panel-2);
-      color: var(--text); padding: 18px 56px 18px 20px; outline: none; transition: 180ms ease;
+      width: 100%; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+      color: var(--text); padding: 14px 52px 14px 16px; outline: none; font-size: 15px;
+      transition: border-color 120ms ease;
     }
+    .url-input::placeholder { color: var(--text-muted); }
+    .url-input:focus { border-color: var(--accent); }
     .paste-btn {
-      position: absolute;
-      right: 8px;
-      width: 40px;
-      height: 40px;
-      border: 1px solid transparent;
-      border-radius: 14px;
-      background: color-mix(in srgb, var(--panel) 70%, transparent);
-      color: var(--muted);
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      transition: 180ms ease;
+      position: absolute; right: 6px; width: 36px; height: 36px;
+      border: 0; border-radius: var(--radius); background: transparent; color: var(--text-muted);
+      display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+      transition: color 120ms ease, background 120ms ease;
     }
-    .paste-btn:hover {
-      color: var(--text);
-      border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-      background: color-mix(in srgb, var(--accent) 14%, var(--panel-2));
-      transform: translateY(-1px);
-    }
+    .paste-btn:hover { color: var(--text); background: var(--surface-sunken); }
     .paste-btn svg { width: 18px; height: 18px; }
-    .url-input:focus { border-color: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent); }
-    .primary, .secondary {
-      border: 0; border-radius: 18px; padding: 16px 22px; cursor: pointer;
-      transition: 180ms ease; font-weight: 760;
+
+    /* Buttons — one primary style everywhere */
+    .primary {
+      border: 0; border-radius: var(--radius); padding: 14px 20px; cursor: pointer;
+      background: var(--accent); color: #FFFFFF; font-size: 14px; font-weight: 600;
+      transition: background 120ms ease;
     }
-    .primary { background: var(--accent); color: #101216; box-shadow: 0 12px 28px color-mix(in srgb, var(--accent) 25%, transparent); }
-    .primary:hover { transform: translateY(-1px); filter: brightness(1.05); }
-    .primary:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
-    .secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
-    .secondary:hover { border-color: var(--accent); }
+    .primary:hover { background: var(--accent-hover); }
+    .primary:disabled { opacity: 0.5; cursor: not-allowed; background: var(--accent); }
+    /* Text-link style action */
+    .link-btn {
+      border: 0; background: transparent; padding: 0; cursor: pointer;
+      color: var(--text); font-size: 14px; font-weight: 500;
+      transition: color 120ms ease;
+    }
+    .link-btn:hover { color: var(--accent); }
+    .link-btn.muted { color: var(--text-muted); }
+    .link-btn.muted:hover { color: var(--accent); }
+
+    /* Options row */
     .options {
-      display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 18px; color: var(--muted);
+      display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3);
+      margin-top: var(--sp-2); font-size: 14px;
     }
-    .option {
-      display: flex; align-items: center; gap: 9px; border: 1px solid var(--border);
-      background: color-mix(in srgb, var(--panel-2) 85%, transparent); padding: 10px 14px; border-radius: 999px;
-    }
-    .option input { accent-color: var(--accent); }
-    .folder-path { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .option { display: flex; align-items: center; gap: 8px; color: var(--text); cursor: pointer; }
+    .option input { accent-color: var(--accent); width: 16px; height: 16px; }
+    .folder-path { color: var(--text-muted); font-size: 13px; max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* Update banner */
     .banner {
-      display: none; align-items: center; justify-content: space-between; gap: 14px;
-      margin-top: 18px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
-      background: color-mix(in srgb, var(--accent) 12%, var(--panel)); padding: 13px 16px; border-radius: 18px;
+      display: none; align-items: center; justify-content: space-between; gap: var(--sp-2);
+      margin-top: var(--sp-3); border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--accent-tint); padding: 12px 16px; font-size: 14px;
     }
-    .results { display: none; margin-top: 24px; }
-    .results-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
-    .results-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-    .btn-group {
-      display: inline-flex;
-      align-items: stretch;
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      overflow: hidden;
-      background: var(--panel-2);
-      box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
+
+    /* Progress */
+    .progress-box { display: none; margin-bottom: var(--sp-6); }
+    .progress-track { height: 5px; background: var(--surface-sunken); border-radius: 999px; overflow: hidden; }
+    .progress-fill { height: 100%; width: 0%; background: var(--accent); border-radius: 999px; transition: width 180ms ease; }
+    .status { margin-top: var(--sp-1); color: var(--text-muted); font-size: 13px; }
+
+    /* Results */
+    .results { display: none; margin-bottom: var(--sp-6); }
+    .results-top {
+      display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2);
+      margin-bottom: var(--sp-3); flex-wrap: wrap;
     }
-    .btn-group .group-btn {
-      border: 0;
-      border-right: 1px solid var(--border);
-      border-radius: 0;
-      padding: 12px 16px;
-      min-width: 108px;
-    }
-    .btn-group .group-btn:last-child { border-right: 0; }
-    .btn-group .group-btn.active {
-      background: color-mix(in srgb, var(--accent) 16%, var(--panel-2));
-      color: var(--text);
-    }
-    .badge { background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; padding: 9px 13px; color: var(--muted); }
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; }
+    .results-actions { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+    .count-label { font-size: 13px; font-weight: 500; letter-spacing: 0.02em; color: var(--text-muted); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: var(--sp-2); }
     .card {
-      position: relative; overflow: hidden; border-radius: 22px; border: 1px solid var(--border);
-      background: var(--panel); box-shadow: 0 12px 40px rgba(0,0,0,.16);
+      position: relative; overflow: hidden; border-radius: var(--radius);
+      border: 1px solid var(--border); background: var(--surface);
+      transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
     }
-    .card img { width: 100%; aspect-ratio: 4/5; object-fit: cover; display: block; background: var(--panel-2); cursor: zoom-in; }
-    .card label {
-      position: absolute; top: 10px; left: 10px; display: flex; align-items: center; gap: 7px;
-      padding: 7px 10px; border-radius: 999px; background: rgba(0,0,0,.62); color: white; font-size: 12px;
+    .card:hover { transform: translateY(-1px); box-shadow: var(--hover-shadow); }
+    .card.selected { border: 2px solid var(--accent); }
+    .card img { width: 100%; aspect-ratio: 4/5; object-fit: cover; display: block; background: var(--surface-sunken); cursor: zoom-in; }
+    .card-badge {
+      position: absolute; top: 8px; left: 8px;
+      padding: 3px 8px; border-radius: 999px;
+      background: var(--surface); border: 1px solid var(--border);
+      color: var(--text); font-size: 12px; font-weight: 500;
     }
-    .progress-box {
-      display: none; margin-top: 22px; padding: 18px; border-radius: 22px; background: var(--panel);
-      border: 1px solid var(--border);
-    }
-    .progress-track { height: 12px; background: var(--panel-2); border-radius: 999px; overflow: hidden; }
-    .progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width 180ms ease; }
-    .status { margin-top: 10px; color: var(--muted); font-size: 14px; }
+    .card-check { position: absolute; top: 8px; right: 8px; }
+    .card-check input { accent-color: var(--accent); width: 18px; height: 18px; cursor: pointer; }
+
+    /* Complete */
     .complete {
-      display: none; margin-top: 18px; padding: 18px; border-radius: 22px; border: 1px solid var(--border);
-      background: var(--panel);
+      display: none; margin-bottom: var(--sp-6); padding: var(--sp-3); border-radius: var(--radius);
+      border: 1px solid var(--border); background: var(--surface); font-size: 14px;
     }
-    .complete strong { color: var(--accent); }
-    footer { margin-top: 22px; text-align: center; color: var(--muted); font-size: 13px; }
+    .complete strong { color: var(--accent); font-weight: 600; }
+    .complete .open-row { margin-top: var(--sp-2); }
+
+    footer { text-align: center; color: var(--text-muted); font-size: 13px; font-weight: 500; letter-spacing: 0.02em; }
     @media (max-width: 760px) {
-      .app { width: min(100vw - 24px, 1180px); }
-      header, .input-row, .results-top { grid-template-columns: 1fr; flex-direction: column; align-items: stretch; }
-      .hero { padding: 24px; }
+      .app { width: calc(100vw - 24px); }
       .input-row { display: flex; flex-direction: column; }
+      .results-top { flex-direction: column; align-items: stretch; }
     }
   </style>
 </head>
@@ -323,10 +325,8 @@ def _html() -> str:
     <header>
       <div class="brand">
         <img id="wordmark" alt="Zefsnap" />
-        <div class="brand-meta">
-          <div id="brandFallback" class="brand-fallback">Zefsnap</div>
-          <div class="version" id="version"></div>
-        </div>
+        <div id="brandFallback" class="brand-fallback">Zefsnap</div>
+        <span class="version" id="version"></span>
       </div>
       <div class="header-actions">
         <div class="powered">Powered by Zef Technology</div>
@@ -351,7 +351,7 @@ def _html() -> str:
       </div>
       <div class="options">
         <label class="option"><input type="checkbox" id="highRes" checked /> High-res mode</label>
-        <button class="secondary" id="folderBtn" type="button">Choose Folder</button>
+        <button class="link-btn" id="folderBtn" type="button">Choose Folder</button>
         <span class="folder-path" id="folderPath">Default: downloads/product-name</span>
       </div>
       <div class="banner" id="updateBanner">
@@ -367,12 +367,10 @@ def _html() -> str:
 
     <section class="results" id="results">
       <div class="results-top">
-        <span class="badge" id="countBadge">0 images found</span>
+        <span class="count-label" id="countBadge">0 images found</span>
         <div class="results-actions">
-          <div class="btn-group" role="group" aria-label="Selection controls">
-            <button class="secondary group-btn" id="selectAllBtn" type="button">Select All</button>
-            <button class="secondary group-btn" id="unselectAllBtn" type="button">Unselect All</button>
-          </div>
+          <button class="link-btn muted" id="selectAllBtn" type="button">Select All</button>
+          <button class="link-btn muted" id="unselectAllBtn" type="button">Unselect All</button>
           <button class="primary" id="downloadBtn" type="button">Download Selected</button>
         </div>
       </div>
@@ -381,7 +379,7 @@ def _html() -> str:
 
     <section class="complete" id="completeBox">
       <div><strong id="productName"></strong> saved to <span id="outputDir"></span></div>
-      <button class="secondary" id="openFolderBtn" style="margin-top:12px">Open Folder</button>
+      <div class="open-row"><button class="link-btn" id="openFolderBtn" type="button">Open Folder</button></div>
     </section>
 
     <footer id="footer">Zefsnap • Powered by Zef Technology</footer>
@@ -393,21 +391,8 @@ def _html() -> str:
     const $ = (id) => document.getElementById(id);
     const scrollRoot = () => document.getElementById("scrollRoot");
 
-    function setThemeVars(theme) {
-      const root = document.documentElement.style;
-      root.setProperty("--accent", theme.accent);
-      root.setProperty("--accent-hover", theme.accent_hover);
-      root.setProperty("--near-black", theme.near_black);
-      root.setProperty("--bg", theme.light_bg);
-      root.setProperty("--panel", theme.light_panel);
-      root.setProperty("--panel-2", theme.light_panel_2);
-      root.setProperty("--muted", theme.light_muted);
-      root.setProperty("--border", theme.light_border);
-    }
-
     async function boot() {
       const config = await window.pywebview.api.get_config();
-      setThemeVars(config.theme);
       $("footer").textContent = config.footer;
       $("version").textContent = `v${config.version}`;
       if (config.assets.icon) $("favicon").href = config.assets.icon;
@@ -479,25 +464,33 @@ def _html() -> str:
       grid.innerHTML = "";
       state.items.forEach((item, index) => {
         const card = document.createElement("article");
-        card.className = "card";
+        card.className = "card selected";
         card.dataset.fullUrl = item.url;
 
-        const label = document.createElement("label");
+        const badge = document.createElement("span");
+        badge.className = "card-badge";
+        badge.textContent = `#${index + 1}`;
+
+        const checkWrap = document.createElement("label");
+        checkWrap.className = "card-check";
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
         checkbox.className = "imageCheck";
         checkbox.checked = true;
         checkbox.dataset.index = String(index);
-        label.appendChild(checkbox);
-        label.appendChild(document.createTextNode(` #${index + 1}`));
+        checkbox.addEventListener("change", () => {
+          card.classList.toggle("selected", checkbox.checked);
+        });
+        checkWrap.appendChild(checkbox);
 
         const img = document.createElement("img");
         img.alt = `Product image ${index + 1}`;
         img.src = item.preview;
         img.addEventListener("click", () => window.open(item.url, "_blank"));
 
-        card.appendChild(label);
         card.appendChild(img);
+        card.appendChild(badge);
+        card.appendChild(checkWrap);
         grid.appendChild(card);
       });
 
@@ -553,13 +546,15 @@ def _html() -> str:
       }
     };
 
-    $("selectAllBtn").onclick = () => {
-      document.querySelectorAll(".imageCheck").forEach((box) => box.checked = true);
-    };
+    function setAllSelected(selected) {
+      document.querySelectorAll(".imageCheck").forEach((box) => {
+        box.checked = selected;
+        box.closest(".card")?.classList.toggle("selected", selected);
+      });
+    }
 
-    $("unselectAllBtn").onclick = () => {
-      document.querySelectorAll(".imageCheck").forEach((box) => box.checked = false);
-    };
+    $("selectAllBtn").onclick = () => setAllSelected(true);
+    $("unselectAllBtn").onclick = () => setAllSelected(false);
 
     $("downloadBtn").onclick = async () => {
       const selected = [...document.querySelectorAll(".imageCheck")]
@@ -635,7 +630,7 @@ def run() -> None:
         "width": 1180,
         "height": 820,
         "min_size": (920, 680),
-        "background_color": "#F6F4EF",
+        "background_color": "#FBFBFD",
     }
     if icon.exists():
         kwargs["icon"] = str(icon)

@@ -1,2 +1,3 @@
 pywebview
 pyinstaller
+certifi>=2024.2.2

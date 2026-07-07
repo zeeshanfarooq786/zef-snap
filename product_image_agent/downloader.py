@@ -4,14 +4,15 @@ import os
 import re
 from pathlib import Path
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from .extractors import USER_AGENT, extract_product_images, prettify_slug, slug_from_url
+from .net import urlopen_safe
 
 
 def fetch_page(url: str, timeout: int = 30) -> str:
     request = Request(url, headers={"User-Agent": USER_AGENT})
-    with urlopen(request, timeout=timeout) as response:
+    with urlopen_safe(request, timeout=timeout) as response:
         return response.read().decode("utf-8", errors="ignore")
 
 
@@ -44,7 +45,7 @@ def filename_from_url(url: str, index: int) -> str:
 
 def download_image(url: str, dest: Path, timeout: int = 60) -> None:
     request = Request(url, headers={"User-Agent": USER_AGENT})
-    with urlopen(request, timeout=timeout) as response:
+    with urlopen_safe(request, timeout=timeout) as response:
         dest.write_bytes(response.read())
 
 

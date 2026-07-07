@@ -8,7 +8,9 @@ from html.parser import HTMLParser
 from typing import Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, unquote, urljoin, urlparse, urlunparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from .net import urlopen_safe
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -116,7 +118,7 @@ def request_ok(url: str, timeout: int = 5) -> bool:
     for method in ("HEAD", "GET"):
         request = Request(url, method=method, headers={"User-Agent": USER_AGENT})
         try:
-            with urlopen(request, timeout=timeout) as response:
+            with urlopen_safe(request, timeout=timeout) as response:
                 return 200 <= response.status < 400
         except HTTPError as exc:
             if exc.code == 405 and method == "HEAD":
