@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import json
 import threading
 
-from . import APP_DISPLAY_NAME, APP_FOOTER, APP_NAME, COMPANY_NAME, __version__
+from . import APP_DISPLAY_NAME, APP_FOOTER, __version__
 from .downloader import discover_product_images, download_product_images, open_folder
-from .self_updater import check_for_update, update_now
-from .theme import asset_path, file_to_data_uri, sample_logo_theme
+from .self_updater import update_now
+from .theme import asset_path, file_to_data_uri
 
 
 def _sanitize_fetch_result(result: dict) -> dict:
@@ -35,41 +34,10 @@ class ZefsnapApi:
         self.last_download: dict | None = None
         self._fetch_status = "idle"
         self._download_status = "idle"
-        self._update_status = "idle"
-        self._update_info: dict | None = None
-        self._config = self._build_config()
-
-    def _emit_js(self, callback: str, payload: dict) -> None:
-        if not self.window:
-            return
-        encoded = json.dumps(payload)
-        self.window.evaluate_js(f"window.{callback}({encoded})")
 
     def _run_async(self, worker) -> dict:
         threading.Thread(target=worker, daemon=True).start()
         return {"status": "started"}
-
-    def _build_config(self) -> dict:
-        theme = sample_logo_theme()
-        icon_png = asset_path("logo images", "icon.png")
-        wordmark = asset_path("logo images", "wordmark-small.png")
-        small_wordmark = asset_path("logo images", "wordmark-small.png")
-        return {
-            "appName": APP_NAME,
-            "company": COMPANY_NAME,
-            "displayName": APP_DISPLAY_NAME,
-            "footer": APP_FOOTER,
-            "version": __version__,
-            "theme": theme,
-            "assets": {
-                "icon": file_to_data_uri(icon_png),
-                "wordmark": file_to_data_uri(wordmark),
-                "smallWordmark": file_to_data_uri(small_wordmark),
-            },
-        }
-
-    def get_config(self) -> dict:
-        return self._config
 
     def get_last_result(self) -> dict:
         if self.last_result:
@@ -90,12 +58,6 @@ class ZefsnapApi:
     def get_download_status(self) -> str:
         return self._download_status
 
-    def get_update_status(self) -> str:
-        return self._update_status
-
-    def get_update_info(self) -> dict:
-        return self._update_info or {"updateAvailable": False}
-
     def paste_clipboard(self) -> str:
         try:
             import tkinter as tk
@@ -111,6 +73,7 @@ class ZefsnapApi:
 
     def fetch_images(self, url: str, high_res: bool = True) -> dict:
         self._fetch_status = "running"
+        self.last_result = None
 
         def worker() -> None:
             try:
@@ -145,27 +108,15 @@ class ZefsnapApi:
 
     def download_selected(self, url: str, image_urls: list[str], output_dir: str | None = None) -> dict:
         image_urls = [str(item) for item in (image_urls or []) if item]
-
-        def progress(index: int, total: int, image_url: str, file_path: str, status: str) -> None:
-            self._emit_js(
-                "zefsnapProgress",
-                {
-                    "index": index,
-                    "total": total,
-                    "url": image_url,
-                    "file": file_path,
-                    "status": status,
-                },
-            )
+        self._download_status = "running"
+        self.last_download = None
 
         def worker() -> None:
-            self._download_status = "running"
             try:
                 result = download_product_images(
                     url,
                     output_dir=output_dir,
                     selected_urls=image_urls,
-                    progress_callback=progress,
                 )
                 self.last_download = result
                 self._download_status = "done" if not result.get("error") else "error"
@@ -186,34 +137,27 @@ class ZefsnapApi:
         except Exception as exc:
             return {"ok": False, "message": str(exc)}
 
-    def check_update(self) -> dict:
-        return check_for_update()
-
-    def check_update_async(self) -> dict:
-        self._update_status = "running"
-
-        def worker() -> None:
-            try:
-                self._update_info = check_for_update()
-            except Exception:
-                self._update_info = {"updateAvailable": False}
-            finally:
-                self._update_status = "done"
-
-        return self._run_async(worker)
-
     def update_now(self, asset_url: str | None) -> dict:
         return update_now(asset_url)
 
 
-def _html() -> str:
-    return r"""<!doctype html>
+def _html(
+    *,
+    wordmark_src: str,
+    favicon_href: str,
+    version: str,
+    footer: str,
+) -> str:
+    wordmark_style = "display:block" if wordmark_src else "display:none"
+    fallback_style = "display:none" if wordmark_src else "display:block"
+    return (
+        r"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Zefsnap</title>
-  <link id="favicon" rel="icon" href="" />
+  <link id="favicon" rel="icon" href="__FAVICON_HREF__" />
   <style>
     :root {
       --bg: #FBFBFD;
@@ -388,9 +332,9 @@ def _html() -> str:
   <main class="app">
     <header>
       <div class="brand">
-        <img id="wordmark" alt="Zefsnap" />
-        <div id="brandFallback" class="brand-fallback">Zefsnap</div>
-        <span class="version" id="version"></span>
+        <img id="wordmark" alt="Zefsnap" src="__WORDMARK_SRC__" style="__WORDMARK_STYLE__" />
+        <div id="brandFallback" class="brand-fallback" style="__FALLBACK_STYLE__">Zefsnap</div>
+        <span class="version" id="version">v__VERSION__</span>
       </div>
       <div class="header-actions">
         <div class="powered">Powered by Zef Technology</div>
@@ -446,7 +390,7 @@ def _html() -> str:
       <div class="open-row"><button class="link-btn" id="openFolderBtn" type="button">Open Folder</button></div>
     </section>
 
-    <footer id="footer">Zefsnap • Powered by Zef Technology</footer>
+    <footer id="footer">__FOOTER__</footer>
   </main>
   </div>
 
@@ -455,7 +399,7 @@ def _html() -> str:
     const $ = (id) => document.getElementById(id);
     const scrollRoot = () => document.getElementById("scrollRoot");
 
-    async function waitForStatus(getter, doneValues, intervalMs = 250) {
+    async function waitForStatus(getter, doneValues, intervalMs = 1000) {
       return new Promise((resolve) => {
         const tick = async () => {
           const status = await getter();
@@ -468,42 +412,6 @@ def _html() -> str:
         tick();
       });
     }
-
-    async function boot() {
-      const config = await window.pywebview.api.get_config();
-      $("footer").textContent = config.footer;
-      $("version").textContent = `v${config.version}`;
-      if (config.assets.icon) $("favicon").href = config.assets.icon;
-      if (config.assets.wordmark) {
-        $("wordmark").src = config.assets.wordmark;
-        $("wordmark").style.display = "block";
-        $("brandFallback").style.display = "none";
-      } else if (config.assets.smallWordmark) {
-        $("wordmark").src = config.assets.smallWordmark;
-        $("wordmark").style.display = "block";
-        $("brandFallback").style.display = "none";
-      } else {
-        $("wordmark").style.display = "none";
-        $("brandFallback").style.display = "block";
-      }
-
-      await window.pywebview.api.check_update_async();
-      await waitForStatus(() => window.pywebview.api.get_update_status(), ["done"]);
-      const update = await window.pywebview.api.get_update_info();
-      if (update.updateAvailable) {
-        state.latestUpdate = update;
-        $("updateText").textContent = `Update available — v${update.latest} (you're on v${update.current})`;
-        $("updateBanner").style.display = "flex";
-      }
-    }
-
-    window.zefsnapProgress = function(payload) {
-      const data = typeof payload === "string" ? JSON.parse(payload) : payload;
-      const percent = data.total ? Math.round((data.index / data.total) * 100) : 0;
-      $("progressBox").style.display = "block";
-      $("progressFill").style.width = `${percent}%`;
-      $("statusText").textContent = `${data.status}: ${data.index}/${data.total} — ${data.file}`;
-    };
 
     function normalizeItems(result) {
       if (Array.isArray(result.items) && result.items.length) {
@@ -677,10 +585,16 @@ def _html() -> str:
       await window.pywebview.api.update_now(state.latestUpdate.assetUrl);
     };
 
-    window.addEventListener("pywebviewready", boot);
   </script>
 </body>
 </html>"""
+        .replace("__FAVICON_HREF__", favicon_href)
+        .replace("__WORDMARK_SRC__", wordmark_src)
+        .replace("__WORDMARK_STYLE__", wordmark_style)
+        .replace("__FALLBACK_STYLE__", fallback_style)
+        .replace("__VERSION__", version)
+        .replace("__FOOTER__", footer)
+    )
 
 
 def _quiet_pywebview_logs() -> None:
@@ -704,12 +618,21 @@ def run() -> None:
 
     _quiet_pywebview_logs()
 
+    wordmark = asset_path("logo images", "wordmark-small.png")
+    icon_png = asset_path("logo images", "icon.png")
+    html = _html(
+        wordmark_src=file_to_data_uri(wordmark),
+        favicon_href=file_to_data_uri(icon_png),
+        version=__version__,
+        footer=APP_FOOTER,
+    )
+
     api = ZefsnapApi()
     icon = asset_path("logo images", "icon.ico")
 
     kwargs = {
         "title": APP_DISPLAY_NAME,
-        "html": _html(),
+        "html": html,
         "js_api": api,
         "width": 1180,
         "height": 820,
