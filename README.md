@@ -1,8 +1,9 @@
 <p align="center">
   <img src="logo images/wordmark-full.png" alt="Zefsnap" width="360" />
 </p>
-
-# Zefsnap — by Zef Technology
+<h1 align="center">Zefsnap</h1>
+<p align="center"><em>by Zef Technology</em></p>
+ 
 
 **Zefsnap** downloads high-resolution product gallery images from ecommerce product pages. Paste a product URL, preview the detected images, deselect anything you do not want, and save the selected set locally.
 
