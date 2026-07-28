@@ -1,18 +1,35 @@
 from __future__ import annotations
 
+import re
 import threading
+from typing import Any
 
 from . import APP_DISPLAY_NAME, APP_FOOTER, __version__
 from .downloader import discover_product_images, download_product_images, open_folder
 from .self_updater import update_now
 from .theme import asset_path, file_to_data_uri
 
+# NEVER store the pywebview Window on the js_api object.
+# pywebview walks public attributes of js_api and recursing into Window.native
+# freezes the WinForms UI ("Not Responding") on Windows.
+_UI_WINDOW: Any = None
+
+
+def _preview_url(url: str) -> str:
+    """Smaller grid thumbs so WebView2 does not stall loading full 2000px assets."""
+    if "scene7.com" in url and "wid=" in url:
+        return re.sub(r"wid=\d+", "wid=480", url, count=1).replace("hei=2000", "hei=480")
+    if "scene7.com" in url:
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}wid=480&hei=480"
+    return url
+
 
 def _sanitize_fetch_result(result: dict) -> dict:
     """Keep bridge payloads small — never send base64 previews through pywebview."""
     image_urls = [str(url) for url in (result.get("images") or []) if url]
     items = [
-        {"url": url, "preview": url}
+        {"url": url, "preview": _preview_url(url)}
         for url in image_urls
     ]
     return {
@@ -28,20 +45,24 @@ def _sanitize_fetch_result(result: dict) -> dict:
 
 
 class ZefsnapApi:
+    """Only methods and underscore-private attrs — public attrs are walked by pywebview."""
+
     def __init__(self) -> None:
-        self.window = None
-        self.last_result: dict | None = None
-        self.last_download: dict | None = None
+        self._last_result: dict | None = None
+        self._last_download: dict | None = None
         self._fetch_status = "idle"
         self._download_status = "idle"
+        self._download_progress = ""
+        self._busy_lock = threading.Lock()
 
     def _run_async(self, worker) -> dict:
-        threading.Thread(target=worker, daemon=True).start()
+        # Always return immediately so the WebView UI thread never waits on network I/O.
+        threading.Thread(target=worker, daemon=True, name="zefsnap-worker").start()
         return {"status": "started"}
 
     def get_last_result(self) -> dict:
-        if self.last_result:
-            return _sanitize_fetch_result(self.last_result)
+        if self._last_result:
+            return _sanitize_fetch_result(self._last_result)
         return {
             "error": None,
             "images_found": 0,
@@ -53,51 +74,53 @@ class ZefsnapApi:
         return self._fetch_status
 
     def get_last_download(self) -> dict:
-        return self.last_download or {"error": "No download result.", "downloaded": []}
+        result = self._last_download or {"error": "No download result.", "downloaded": []}
+        # Keep bridge payloads tiny — paths only, no bulky nested objects.
+        return {
+            "error": result.get("error"),
+            "product_name": result.get("product_name"),
+            "output_dir": result.get("output_dir"),
+            "downloaded_count": len(result.get("downloaded") or []),
+        }
 
     def get_download_status(self) -> str:
         return self._download_status
 
-    def paste_clipboard(self) -> str:
-        try:
-            import tkinter as tk
-
-            root = tk.Tk()
-            root.withdraw()
-            try:
-                return str(root.clipboard_get()).strip()
-            finally:
-                root.destroy()
-        except Exception:
-            return ""
+    def get_download_progress(self) -> str:
+        return self._download_progress
 
     def fetch_images(self, url: str, high_res: bool = True) -> dict:
+        if not self._busy_lock.acquire(blocking=False):
+            return {"status": "busy"}
         self._fetch_status = "running"
-        self.last_result = None
+        self._last_result = None
 
         def worker() -> None:
             try:
                 result = discover_product_images(url, use_js=False, high_res=high_res)
-                self.last_result = _sanitize_fetch_result(result)
+                self._last_result = _sanitize_fetch_result(result)
                 self._fetch_status = "done"
             except Exception as exc:
-                self.last_result = {
+                self._last_result = {
                     "error": str(exc),
                     "images_found": 0,
                     "images": [],
                     "items": [],
                 }
                 self._fetch_status = "error"
+            finally:
+                self._busy_lock.release()
 
         return self._run_async(worker)
 
     def choose_folder(self) -> str | None:
-        if not self.window:
+        window = _UI_WINDOW
+        if not window:
             return None
         try:
             import webview
 
-            result = self.window.create_file_dialog(webview.FOLDER_DIALOG)
+            result = window.create_file_dialog(webview.FOLDER_DIALOG)
             if isinstance(result, tuple) and result:
                 return result[0]
             if isinstance(result, list) and result:
@@ -106,27 +129,62 @@ class ZefsnapApi:
             return None
         return None
 
-    def download_selected(self, url: str, image_urls: list[str], output_dir: str | None = None) -> dict:
-        image_urls = [str(item) for item in (image_urls or []) if item]
+    def download_selected(self, url: str, image_urls=None, output_dir: str | None = None) -> dict:
+        # Guard against PyWebView arg quirks: folder paths must never be treated as URL lists.
+        if isinstance(image_urls, str) and not image_urls.lower().startswith(("http://", "https://")):
+            # Likely received output_dir in the image_urls slot.
+            if output_dir is None and (":" in image_urls or image_urls.startswith(("/", "\\"))):
+                output_dir = image_urls
+            image_urls = []
+        if isinstance(output_dir, list):
+            # Args swapped: treat list as URLs and ignore bad output_dir.
+            image_urls = output_dir
+            output_dir = None
+
+        from .downloader import _normalize_image_urls
+
+        image_urls = _normalize_image_urls(image_urls)
+        if not str(url or "").lower().startswith(("http://", "https://")):
+            return {"status": "error", "error": "A valid product URL is required before downloading."}
+
+        if not self._busy_lock.acquire(blocking=False):
+            return {"status": "busy"}
         self._download_status = "running"
-        self.last_download = None
+        self._download_progress = f"0/{len(image_urls)}"
+        self._last_download = None
+
+        def progress(index: int, total: int, image_url: str, file_path: str, status: str) -> None:
+            self._download_progress = f"{index}/{total}"
 
         def worker() -> None:
             try:
+                if not image_urls:
+                    self._last_download = {
+                        "error": "No valid image URLs selected.",
+                        "downloaded": [],
+                        "output_dir": output_dir,
+                        "product_name": None,
+                    }
+                    self._download_status = "error"
+                    return
                 result = download_product_images(
                     url,
-                    output_dir=output_dir,
+                    output_dir=output_dir if isinstance(output_dir, str) or output_dir is None else None,
                     selected_urls=image_urls,
+                    progress_callback=progress,
                 )
-                self.last_download = result
+                self._last_download = result
                 self._download_status = "done" if not result.get("error") else "error"
             except Exception as exc:
-                self.last_download = {
+                self._last_download = {
                     "error": str(exc),
                     "downloaded": [],
-                    "output_dir": output_dir,
+                    "output_dir": output_dir if isinstance(output_dir, str) else None,
+                    "product_name": None,
                 }
                 self._download_status = "error"
+            finally:
+                self._busy_lock.release()
 
         return self._run_async(worker)
 
@@ -138,7 +196,17 @@ class ZefsnapApi:
             return {"ok": False, "message": str(exc)}
 
     def update_now(self, asset_url: str | None) -> dict:
-        return update_now(asset_url)
+        # Never download on the UI/bridge thread — that freezes the window.
+        if not self._busy_lock.acquire(blocking=False):
+            return {"status": "busy"}
+
+        def worker() -> None:
+            try:
+                update_now(asset_url)
+            finally:
+                self._busy_lock.release()
+
+        return self._run_async(worker)
 
 
 def _html(
@@ -346,8 +414,8 @@ def _html(
       <p class="subtitle">Paste a product page URL. Zefsnap finds high-resolution images, lets you review them, and saves the selected set locally.</p>
       <div class="input-row">
         <div class="url-field">
-          <input class="url-input" id="url" placeholder="Paste product page URL here" />
-          <button class="paste-btn" id="pasteBtn" type="button" title="Paste from clipboard" aria-label="Paste from clipboard">
+          <input class="url-input" id="url" placeholder="Paste product page URL here" disabled />
+          <button class="paste-btn" id="pasteBtn" type="button" title="Paste from clipboard" aria-label="Paste from clipboard" disabled>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <rect x="8" y="2" width="12" height="16" rx="2"></rect>
               <path d="M4 6a2 2 0 0 1 2-2h1"></path>
@@ -355,11 +423,11 @@ def _html(
             </svg>
           </button>
         </div>
-        <button class="primary" id="fetchBtn">Fetch Images</button>
+        <button class="primary" id="fetchBtn" disabled>Fetch Images</button>
       </div>
       <div class="options">
         <label class="option"><input type="checkbox" id="highRes" checked /> High-res mode</label>
-        <button class="link-btn" id="folderBtn" type="button">Choose Folder</button>
+        <button class="link-btn" id="folderBtn" type="button" disabled>Choose Folder</button>
         <span class="folder-path" id="folderPath">Default: downloads/product-name</span>
       </div>
       <div class="banner" id="updateBanner">
@@ -368,9 +436,9 @@ def _html(
       </div>
     </section>
 
-    <section class="progress-box" id="progressBox">
+    <section class="progress-box" id="progressBox" style="display:block">
       <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
-      <div class="status" id="statusText">Waiting...</div>
+      <div class="status" id="statusText">Starting…</div>
     </section>
 
     <section class="results" id="results">
@@ -379,7 +447,7 @@ def _html(
         <div class="results-actions">
           <button class="link-btn muted" id="selectAllBtn" type="button">Select All</button>
           <button class="link-btn muted" id="unselectAllBtn" type="button">Unselect All</button>
-          <button class="primary" id="downloadBtn" type="button">Download Selected</button>
+          <button class="primary" id="downloadBtn" type="button" disabled>Download Selected</button>
         </div>
       </div>
       <div class="grid" id="grid"></div>
@@ -395,22 +463,58 @@ def _html(
   </div>
 
   <script>
-    const state = { images: [], items: [], url: "", folder: null, latestUpdate: null };
+    const state = { images: [], items: [], url: "", folder: null, latestUpdate: null, ready: false };
     const $ = (id) => document.getElementById(id);
     const scrollRoot = () => document.getElementById("scrollRoot");
 
-    async function waitForStatus(getter, doneValues, intervalMs = 1000) {
-      return new Promise((resolve) => {
-        const tick = async () => {
-          const status = await getter();
-          if (doneValues.includes(status)) {
-            resolve(status);
-            return;
-          }
-          setTimeout(tick, intervalMs);
-        };
-        tick();
+    function setControlsEnabled(enabled) {
+      ["fetchBtn", "pasteBtn", "folderBtn", "downloadBtn", "selectAllBtn", "unselectAllBtn"].forEach((id) => {
+        const el = $(id);
+        if (el) el.disabled = !enabled;
       });
+      const url = $("url");
+      if (url) url.disabled = !enabled;
+    }
+
+    function ensureReady() {
+      if (state.ready && window.pywebview && window.pywebview.api) return true;
+      $("statusText").textContent = "App is still starting — wait a second, then try again.";
+      $("progressBox").style.display = "block";
+      return false;
+    }
+
+    window.addEventListener("pywebviewready", () => {
+      state.ready = true;
+      setControlsEnabled(true);
+      $("statusText").textContent = "Ready.";
+      $("progressBox").style.display = "none";
+    });
+    // Fallback if the ready event is missed on some WebView2 builds.
+    setTimeout(() => {
+      if (state.ready) return;
+      if (window.pywebview && window.pywebview.api) {
+        state.ready = true;
+        setControlsEnabled(true);
+        $("statusText").textContent = "Ready.";
+        $("progressBox").style.display = "none";
+      }
+    }, 2500);
+
+    function watchJob(getStatus, onDone, onTick, intervalMs = 600) {
+      // Non-blocking poller: never holds the UI waiting on a long Python call chain.
+      const timer = setInterval(async () => {
+        try {
+          const status = await getStatus();
+          if (onTick) onTick(status);
+          if (status === "done" || status === "error") {
+            clearInterval(timer);
+            onDone(status);
+          }
+        } catch (error) {
+          // Keep polling; transient bridge glitches should not freeze the window.
+        }
+      }, intervalMs);
+      return timer;
     }
 
     function normalizeItems(result) {
@@ -495,6 +599,7 @@ def _html(
     }
 
     $("folderBtn").onclick = async () => {
+      if (!ensureReady()) return;
       const folder = await window.pywebview.api.choose_folder();
       if (folder) {
         state.folder = folder;
@@ -503,9 +608,11 @@ def _html(
     };
 
     $("pasteBtn").onclick = async () => {
+      if (!ensureReady()) return;
+      // Prefer browser clipboard — never create a Tk window inside PyWebView (deadlocks on Windows).
       let text = "";
       try {
-        text = await window.pywebview.api.paste_clipboard();
+        text = (await navigator.clipboard.readText()).trim();
       } catch (error) {
         text = "";
       }
@@ -517,23 +624,38 @@ def _html(
     };
 
     $("fetchBtn").onclick = async () => {
+      if (!ensureReady()) return;
       state.url = $("url").value.trim();
       if (!state.url) return;
       clearPreviousSession();
       $("fetchBtn").disabled = true;
       $("statusText").textContent = "Fetching product page...";
       $("progressBox").style.display = "block";
-      $("progressFill").style.width = "12%";
+      $("progressFill").style.width = "18%";
       scrollToElement($("progressBox"));
-      await window.pywebview.api.fetch_images(state.url, $("highRes").checked);
-      await waitForStatus(() => window.pywebview.api.get_fetch_status(), ["done", "error"]);
-      const result = await window.pywebview.api.get_last_result();
-      renderResults(result);
-      $("progressFill").style.width = result.images_found ? "100%" : "0%";
-      $("fetchBtn").disabled = false;
-      if (state.items.length) {
-        setTimeout(() => scrollToElement($("results")), 120);
+      const started = await window.pywebview.api.fetch_images(state.url, $("highRes").checked);
+      if (started && started.status === "busy") {
+        $("statusText").textContent = "Another job is still running. Please wait.";
+        $("fetchBtn").disabled = false;
+        return;
       }
+      watchJob(
+        () => window.pywebview.api.get_fetch_status(),
+        async () => {
+          const result = await window.pywebview.api.get_last_result();
+          renderResults(result);
+          $("progressFill").style.width = result.images_found ? "100%" : "0%";
+          $("fetchBtn").disabled = false;
+          if (state.items.length) {
+            setTimeout(() => scrollToElement($("results")), 120);
+          }
+        },
+        () => {
+          $("statusText").textContent = "Fetching product images...";
+          const width = Math.min(85, parseInt($("progressFill").style.width || "18", 10) + 4);
+          $("progressFill").style.width = `${width}%`;
+        }
+      );
     };
 
     function setAllSelected(selected) {
@@ -547,32 +669,60 @@ def _html(
     $("unselectAllBtn").onclick = () => setAllSelected(false);
 
     $("downloadBtn").onclick = async () => {
+      if (!ensureReady()) return;
       const selected = [...document.querySelectorAll(".imageCheck")]
         .filter((box) => box.checked)
         .map((box) => box.closest(".card")?.dataset.fullUrl || state.items[Number(box.dataset.index)]?.url)
-        .filter(Boolean);
+        .filter((url) => typeof url === "string" && /^https?:\/\//i.test(url));
       if (!selected.length) {
         $("statusText").textContent = "Select at least one image to download.";
+        return;
+      }
+      if (!state.url || !/^https?:\/\//i.test(state.url)) {
+        $("statusText").textContent = "Product URL is missing. Fetch images again first.";
         return;
       }
       $("downloadBtn").disabled = true;
       $("completeBox").style.display = "none";
       $("progressBox").style.display = "block";
-      $("progressFill").style.width = "0%";
+      $("progressFill").style.width = "5%";
+      $("statusText").textContent = "Downloading selected images...";
       scrollToElement($("progressBox"));
-      await window.pywebview.api.download_selected(state.url, selected, state.folder);
-      await waitForStatus(() => window.pywebview.api.get_download_status(), ["done", "error"]);
-      const result = await window.pywebview.api.get_last_download();
-      $("downloadBtn").disabled = false;
-      if (!result.error) {
-        $("completeBox").style.display = "block";
-        $("productName").textContent = result.product_name;
-        $("outputDir").textContent = result.output_dir;
-        $("openFolderBtn").dataset.path = result.output_dir;
-        $("statusText").textContent = "Download complete.";
-      } else {
-        $("statusText").textContent = result.error;
+      const folder = (typeof state.folder === "string" && state.folder) ? state.folder : null;
+      const started = await window.pywebview.api.download_selected(state.url, selected, folder);
+      if (started && started.status === "busy") {
+        $("statusText").textContent = "Another job is still running. Please wait.";
+        $("downloadBtn").disabled = false;
+        return;
       }
+      watchJob(
+        () => window.pywebview.api.get_download_status(),
+        async () => {
+          const result = await window.pywebview.api.get_last_download();
+          $("downloadBtn").disabled = false;
+          if (!result.error) {
+            $("completeBox").style.display = "block";
+            $("productName").textContent = result.product_name;
+            $("outputDir").textContent = result.output_dir;
+            $("openFolderBtn").dataset.path = result.output_dir;
+            $("progressFill").style.width = "100%";
+            $("statusText").textContent = "Download complete.";
+          } else {
+            $("statusText").textContent = result.error;
+          }
+        },
+        async () => {
+          try {
+            const progress = await window.pywebview.api.get_download_progress();
+            if (progress && progress.includes("/")) {
+              const [current, total] = progress.split("/");
+              const percent = total && Number(total) ? Math.round((Number(current) / Number(total)) * 100) : 10;
+              $("progressFill").style.width = `${Math.max(5, percent)}%`;
+              $("statusText").textContent = `Downloading ${progress}...`;
+            }
+          } catch (error) {}
+        }
+      );
     };
 
     $("openFolderBtn").onclick = async () => {
@@ -611,6 +761,8 @@ def _quiet_pywebview_logs() -> None:
 
 
 def run() -> None:
+    global _UI_WINDOW
+
     try:
         import webview
     except ImportError as exc:
@@ -619,10 +771,10 @@ def run() -> None:
     _quiet_pywebview_logs()
 
     wordmark = asset_path("logo images", "wordmark-small.png")
-    icon_png = asset_path("logo images", "icon.png")
+    # Do not embed icon.png (large). A missing favicon is fine and keeps startup light.
     html = _html(
         wordmark_src=file_to_data_uri(wordmark),
-        favicon_href=file_to_data_uri(icon_png),
+        favicon_href="",
         version=__version__,
         footer=APP_FOOTER,
     )
@@ -647,7 +799,9 @@ def run() -> None:
     except TypeError:
         kwargs.pop("icon", None)
         window = webview.create_window(**kwargs)
-    api.window = window
+
+    # Keep the Window off the js_api instance (see _UI_WINDOW note above).
+    _UI_WINDOW = window
 
     # http_server=True serves the UI over localhost instead of injecting raw
     # HTML, which avoids the native-object serialization path that triggers the

@@ -17,6 +17,12 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
+BROWSER_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
 
 def normalize_url(url: str, base: str | None = None) -> str:
     url = html_lib.unescape(url.strip())
@@ -337,6 +343,275 @@ class BaseExtractor(ABC):
         return unique_preserve_order(filtered)
 
 
+class FossilExtractor(BaseExtractor):
+    """Fetch Fossil gallery images from Adobe Scene7 FossilPartners catalog.
+
+    Fossil product HTML is bot-protected (HTTP 403), but Scene7 still exposes
+    an imageset for the product id in the URL (e.g. ZB11112249).
+    """
+
+    domains = ("fossil.com",)
+
+    def extract(self, html: str, page_url: str, *, high_res: bool = True) -> list[str]:
+        return self.extract_from_url(page_url, high_res=high_res)
+
+    def extract_from_url(self, page_url: str, *, high_res: bool = True) -> list[str]:
+        product_id = self._product_id_from_url(page_url)
+        if not product_id:
+            return []
+
+        imageset_url = (
+            f"https://fossil.scene7.com/is/image/FossilPartners/{product_id}_is?req=imageset"
+        )
+        request = Request(
+            imageset_url,
+            headers={"User-Agent": USER_AGENT, "Accept": "text/plain,*/*"},
+        )
+        with urlopen_safe(request, timeout=15) as response:
+            payload = response.read().decode("utf-8", errors="ignore")
+
+        asset_names = unique_preserve_order(
+            re.findall(r"FossilPartners/([A-Za-z0-9_]+)", payload)
+        )
+        if not asset_names:
+            # Fallback: try the conventional main shot.
+            asset_names = [f"{product_id}_main"]
+
+        size = "2000" if high_res else "800"
+        urls = [
+            f"https://fossil.scene7.com/is/image/FossilPartners/{name}?wid={size}&hei={size}"
+            for name in asset_names
+        ]
+        return self._finish(urls, page_url, high_res=False)
+
+    def _product_id_from_url(self, page_url: str) -> str | None:
+        path = urlparse(page_url).path
+        last = unquote(path.rstrip("/").split("/")[-1])
+        last = re.sub(r"\.html?$", "", last, flags=re.I)
+        # Fossil style ids look like ZB11112249 / ES4579 / etc.
+        if re.fullmatch(r"[A-Za-z]{1,4}\d{4,}", last):
+            return last.upper()
+        # Sometimes the id is the last path segment after a slug.
+        for part in reversed(path.split("/")):
+            part = re.sub(r"\.html?$", "", unquote(part), flags=re.I)
+            if re.fullmatch(r"[A-Za-z]{1,4}\d{4,}", part):
+                return part.upper()
+        return None
+
+
+class PalmFlexExtractor(BaseExtractor):
+    """PalmFlex (X-Cart) galleries.
+
+    Product HTML is Cloudflare-protected, but once HTML is available the gallery
+    lives under /var/images/product* paths. Style codes in the URL (e.g. 86350)
+    also map to public thumbnail assets as a last-resort fallback.
+    """
+
+    domains = ("palmflex.com",)
+
+    def extract(self, html: str, page_url: str, *, high_res: bool = True) -> list[str]:
+        urls: list[str] = []
+        patterns = [
+            r'(?:https?:)?//(?:www\.)?palmflex\.com/var/images/(?:product|product_variant|detailed)[^"\'\s<>]+',
+            r'/var/images/(?:product|product_variant|detailed)/[^"\'\s<>]+',
+            r'"(?:full|image|src|url|thumbnail|preview)"\s*:\s*"(https?:[^"]+/var/images/[^"]+)"',
+        ]
+        for pattern in patterns:
+            for match in re.findall(pattern, html, flags=re.I):
+                urls.append(normalize_url(match, page_url))
+
+        # Do not probe alternate size folders — PalmFlex 404s most of them and it is very slow.
+        finished = self._finish(urls, page_url, high_res=False)
+        if finished:
+            return finished
+        return self.extract_from_url(page_url, high_res=high_res)
+
+    def extract_from_url(self, page_url: str, *, high_res: bool = True) -> list[str]:
+        style = self._style_from_url(page_url)
+        if not style:
+            return []
+
+        # Public CDN thumbs only — larger folders for this host are usually 404.
+        # Return immediately with no network probing so fetch stays fast.
+        urls = [
+            f"https://www.palmflex.com/var/images/product/160.160/{style}---up.webp",
+            f"https://www.palmflex.com/var/images/product_variant/160.160/{style}---up.webp",
+        ]
+        return self._finish(urls[:1], page_url, high_res=False)
+
+    def _style_from_url(self, page_url: str) -> str | None:
+        slug = slug_from_url(page_url)
+        # pip-86350-ironcat-... or west-chester-86350-...
+        match = re.search(r"(?:^|-)(\d{4,6})(?:-|$)", slug)
+        return match.group(1) if match else None
+
+
+class CoachExtractor(BaseExtractor):
+    """Build Coach gallery URLs from Adobe Scene7.
+
+    Coach product HTML is Akamai-protected (HTTP 403). Images are still
+    publicly available on coach.scene7.com using style + color codes from the URL.
+    Example: .../CH857+B4%2FHA.html -> Coach/ch857_b4ha_a0
+    """
+
+    domains = ("coach.com", "coachoutlet.com")
+
+    def extract(self, html: str, page_url: str, *, high_res: bool = True) -> list[str]:
+        return self.extract_from_url(page_url, high_res=high_res)
+
+    def extract_from_url(self, page_url: str, *, high_res: bool = True) -> list[str]:
+        asset_id = self._scene7_id_from_url(page_url)
+        if not asset_id:
+            return []
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        size = "2000" if high_res else "800"
+        candidates = [
+            (
+                f"https://coach.scene7.com/is/image/Coach/{asset_id}_a{index}"
+                f"?wid={size}&hei={size}"
+            )
+            for index in range(0, 16)
+        ]
+        found_map: dict[int, str] = {}
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {
+                pool.submit(self._image_exists, url): (index, url)
+                for index, url in enumerate(candidates)
+            }
+            for future in as_completed(futures):
+                index, url = futures[future]
+                try:
+                    if future.result():
+                        found_map[index] = url
+                except Exception:
+                    continue
+        found = [found_map[i] for i in sorted(found_map)]
+        return self._finish(found, page_url, high_res=False)
+
+    def _scene7_id_from_url(self, page_url: str) -> str | None:
+        path = urlparse(page_url).path
+        last = unquote(path.rstrip("/").split("/")[-1])
+        last = re.sub(r"\.html?$", "", last, flags=re.I)
+        if not last:
+            return None
+        if "+" in last:
+            style, color = last.split("+", 1)
+            color = re.sub(r"[^A-Za-z0-9]", "", color)
+            style = re.sub(r"[^A-Za-z0-9]", "", style)
+            if style and color:
+                return f"{style.lower()}_{color.lower()}"
+        cleaned = re.sub(r"[^A-Za-z0-9]+", "_", last).strip("_").lower()
+        return cleaned or None
+
+    def _image_exists(self, url: str) -> bool:
+        request = Request(
+            url,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "image/webp,image/jpeg,image/*,*/*;q=0.8",
+            },
+        )
+        try:
+            with urlopen_safe(request, timeout=10) as response:
+                data = response.read(64)
+                return bool(response.status == 200 and data and len(data) >= 16)
+        except (HTTPError, URLError, OSError, ValueError):
+            return False
+
+
+class LouisVuittonExtractor(BaseExtractor):
+    """Fetch gallery images from Louis Vuitton's catalog API.
+
+    The public product HTML is often blocked (HTTP 403), but the JSON catalog
+    API still returns product media for a SKU such as M28426.
+    """
+
+    domains = ("louisvuitton.com",)
+
+    def extract(self, html: str, page_url: str, *, high_res: bool = True) -> list[str]:
+        # Prefer the API path even when HTML is available.
+        return self.extract_from_url(page_url, high_res=high_res)
+
+    def extract_from_url(self, page_url: str, *, high_res: bool = True) -> list[str]:
+        sku = self._sku_from_url(page_url)
+        locale = self._locale_from_url(page_url)
+        if not sku:
+            return []
+
+        product_id = self._product_id_for_sku(sku, locale)
+        if not product_id:
+            return []
+
+        payload = self._fetch_json(
+            f"https://api.louisvuitton.com/api/{locale}/catalog/product/{product_id}"
+        )
+        urls: list[str] = []
+        for model in payload.get("model") or []:
+            if not isinstance(model, dict):
+                continue
+            if str(model.get("identifier") or "").upper() != sku.upper():
+                continue
+            for image in model.get("image") or []:
+                if not isinstance(image, dict):
+                    continue
+                content_url = str(image.get("contentUrl") or "").strip()
+                if content_url:
+                    urls.append(self._normalize_lv_image(content_url, high_res=high_res))
+
+        return self._finish(urls, page_url, high_res=False)
+
+    def _sku_from_url(self, page_url: str) -> str | None:
+        path = urlparse(page_url).path.rstrip("/")
+        parts = [part for part in path.split("/") if part]
+        if not parts:
+            return None
+        candidate = parts[-1]
+        if re.fullmatch(r"[A-Za-z]\d{4,6}", candidate):
+            return candidate.upper()
+        # Fallback: look for a trailing SKU-like token anywhere in the path.
+        for part in reversed(parts):
+            if re.fullmatch(r"[A-Za-z]\d{4,6}", part):
+                return part.upper()
+        return None
+
+    def _locale_from_url(self, page_url: str) -> str:
+        path = urlparse(page_url).path
+        match = re.search(r"/([a-z]{3}-[a-z]{2})/", path, flags=re.I)
+        return match.group(1).lower() if match else "eng-us"
+
+    def _product_id_for_sku(self, sku: str, locale: str) -> str | None:
+        payload = self._fetch_json(
+            f"https://api.louisvuitton.com/api/{locale}/catalog/sku/{sku}/persodetails"
+        )
+        product_id = payload.get("productId")
+        return str(product_id) if product_id else None
+
+    def _fetch_json(self, url: str) -> dict:
+        request = Request(
+            url,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": "https://us.louisvuitton.com/eng-us/",
+                "Origin": "https://us.louisvuitton.com",
+            },
+        )
+        with urlopen_safe(request, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8", errors="ignore"))
+
+    def _normalize_lv_image(self, url: str, *, high_res: bool) -> str:
+        url = url.replace(" ", "%20")
+        if high_res:
+            url = url.replace("{IMG_WIDTH}", "2000").replace("{IMG_HEIGHT}", "2000")
+        else:
+            url = url.replace("{IMG_WIDTH}", "800").replace("{IMG_HEIGHT}", "800")
+        return url
+
+
 class QuinceExtractor(BaseExtractor):
     domains = ("quince.com",)
 
@@ -500,9 +775,21 @@ class GenericExtractor(BaseExtractor):
 
 
 EXTRACTORS: list[BaseExtractor] = [
+    FossilExtractor(),
+    PalmFlexExtractor(),
+    CoachExtractor(),
+    LouisVuittonExtractor(),
     QuinceExtractor(),
     BigCommerceExtractor(),
     GenericExtractor(),
+]
+
+# Extractors that can resolve images without fetching the (often blocked) HTML page.
+API_EXTRACTORS: list[BaseExtractor] = [
+    FossilExtractor(),
+    PalmFlexExtractor(),
+    CoachExtractor(),
+    LouisVuittonExtractor(),
 ]
 
 
